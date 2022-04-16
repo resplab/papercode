@@ -1,3 +1,5 @@
+## By Abdollah Safari <a.saffari72@gmail.com>
+
 ## Required packages
 library(pROC)
 library(tidyr)
@@ -6,6 +8,7 @@ library(ggplot2)
 library(magrittr)
 library(ggpubr)
 library(tidypaleo)
+
 
 
 ## Solve cubic equation: excast
