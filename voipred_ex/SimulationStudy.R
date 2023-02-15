@@ -5,7 +5,7 @@ main <- function(n_sim=10)
 {
   library(foreach)
   library(doParallel)
-  num_cores <- detectCores()-2
+  num_cores <- detectCores()-1
   cl <- makeCluster(num_cores)
   registerDoParallel(cl)
   
@@ -25,6 +25,32 @@ main <- function(n_sim=10)
   out
 }
 
+main_asym <- function(n_sim=10)
+{
+  library(foreach)
+  library(doParallel)
+  num_cores <- detectCores()-1
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  
+  out <- foreach(i=1:n_sim) %dopar%{
+    library(pROC)
+    library(mvtnorm)
+    library(predtools)
+    source('SimulationStudyHelper.R')
+    source('helper_functions.R')
+    tmp <- perturbed_scenarios_intercept_noise_asym(seed=i)
+    if(i%%500==0){
+    saveRDS(tmp,paste0("sim_results_asym/",i,".rds"))
+    }
+    tmp
+  }
+  stopCluster(cl)
+  out <- do.call(rbind,out) %>% 
+    as.data.frame()
+  colnames(out)[1:4] <- c("sample_size","event_p","noise_sd","c_intercept")
+  out
+}
 
 
 process_results <- function()
@@ -33,7 +59,9 @@ process_results <- function()
         AVG(evpiv_ob1) AS EVPIv_ob1, AVG(evpiv_ob2) AS EVPIv_ob2, AVG(evpiv_ob3) AS EVPIv_ob3,
         AVG(evpiv_bb1) AS EVPIv_bb1, AVG(evpiv_bb2) AS EVPIv_bb2, AVG(evpiv_bb3) AS EVPIv_bb3,
         AVG(evpiv_as1) AS EVPIv_as1, AVG(evpiv_as2) AS EVPIv_as2, AVG(evpiv_as3) AS EVPIv_as3,
-        SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se1, SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se2, SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se3, 
+        SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se_ob1, SQRT(VARIANCE(evpiv_ob2)/count(*)) AS se_ob2, SQRT(VARIANCE(evpiv_ob3)/count(*)) AS se_ob3, 
+        SQRT(VARIANCE(evpiv_bb1)/count(*)) AS se_bb1, SQRT(VARIANCE(evpiv_bb2)/count(*)) AS se_bb2, SQRT(VARIANCE(evpiv_bb3)/count(*)) AS se_bb3, 
+        SQRT(VARIANCE(evpiv_as1)/count(*)) AS se_as1, SQRT(VARIANCE(evpiv_as2)/count(*)) AS se_as2, SQRT(VARIANCE(evpiv_as3)/count(*)) AS se_as3, 
         AVG(p_useful1) AS p_useful1, AVG(p_useful2) AS p_useful2, AVG(p_useful3) AS p_useful3, 
         SQRT(VARIANCE(NB_model1-MAX(NB_all1,0))) AS sddNB1, SQRT(VARIANCE(NB_model2-MAX(NB_all2,0))) AS sddNB2, SQRT(VARIANCE(NB_model3-MAX(NB_all3,0))) AS sddNB3, 
         AVG(NB_model1) AS NB_model1, AVG(NB_model2) AS NB_model2, AVG(NB_model3) AS NB_model3, 
@@ -41,11 +69,15 @@ process_results <- function()
         AVG(auc) AS auc, AVG(prev) AS prev, AVG(predprev) AS predprev, 
         AVG(check_intercept) AS check_intercept, AVG(check_slope) AS check_slope
         FROM res GROUP BY sample_size, event_p, noise_sd, c_intercept")
-  
   x
 }
 
-res <- main(n=100)
+
+res <- rbind(read_rds("simulation_results_1.rds"),read_rds("simulation_results_2.rds"))
+
+# # Uncomment and run the following lines if you wish to replicate the results
+# res <- main(n=10000)
+# write_rds(res,"simulation_results.rds")
 
 processed_res <- process_results() %>% 
   filter(sample_size>200)
@@ -56,21 +88,30 @@ tidy_df <- function(df,types,index){
   tmp <- NULL
   for(i in 1:length(types)){
     type <- types[i]
-    tmp[[i]] <-   df %>% 
+    index_names <- colnames(df)[index]
+    tmp_df <- df %>% 
       mutate(type=type) %>% 
-      select(index,type,contains(type)) %>% 
+      select(index,type,contains(type))
+    tmp_EVPI <- tmp_df %>% 
+      select(!starts_with("se")) %>% 
       pivot_longer(cols=starts_with("EVPI"),names_to="threshold",values_to="EVPI") %>% 
       mutate(threshold=parse_number(threshold)/10)
+    tmp_sd <- tmp_df %>% 
+      select(!starts_with("EVPI")) %>% 
+      pivot_longer(cols=starts_with("se"),names_to="threshold",values_to="se") %>% 
+      mutate(threshold=parse_number(threshold)/10)
+    tmp[[i]] <-   tmp_EVPI %>% 
+      left_join(tmp_sd,by=c(index_names,"type","threshold"))
   }
   do.call(rbind,tmp)
-  
 }
 
 df_sample_size <- processed_res %>% 
   filter(c_intercept==0) %>% 
-  select(sample_size,starts_with("EVPI"))
+  select(sample_size,starts_with("EVPI")|starts_with("se"))
 
-df_sample_size <- tidy_df(df_sample_size,types,index=1)
+df_sample_size <- tidy_df(df_sample_size,types,index=1) %>% 
+  mutate(signal_noise_ratio = EVPI/se)
 
 fig.size <- 1.3
 alpha.size <- 0.7
@@ -95,9 +136,10 @@ ggplot(data=df_sample_size %>%
 
 df_int <-  processed_res %>% 
   filter(!is.na(c_intercept)) %>% 
-  select(sample_size,c_intercept,starts_with("EVPI"))
+  select(sample_size,c_intercept,starts_with("EVPI")|starts_with("se"))
 
-df_int <- tidy_df(df_int,types,index=c(1,2))
+df_int <- tidy_df(df_int,types,index=c(1,2)) %>% 
+  mutate(signal_noise_ratio = EVPI/se)
 
 # Figure S1
 ggplot(data=df_int %>% 
@@ -122,9 +164,10 @@ ggplot(data=df_int %>%
 
 df_slope <-  processed_res %>% 
   filter(!is.na(noise_sd) & is.na(c_intercept)) %>% 
-  select(sample_size,noise_sd,starts_with("EVPI"))
+  select(sample_size,noise_sd,starts_with("EVPI")|starts_with("se")) 
 
-df_slope <- tidy_df(df_slope,types,index=c(1,2))
+df_slope <- tidy_df(df_slope,types,index=c(1,2))%>% 
+  mutate(signal_noise_ratio = EVPI/se)
 
 # Figure S2
 ggplot(data=df_slope %>% 
@@ -144,3 +187,42 @@ ggplot(data=df_slope %>%
   theme(legend.position = 'top',
         legend.title=element_blank(),
         text=element_text(size=18))
+
+library(openxlsx)
+
+wb <- createWorkbook()
+addWorksheet(wb,"results")
+addWorksheet(wb, "sample_size")
+addWorksheet(wb, "intercept")
+addWorksheet(wb, "SD_noise")
+
+writeDataTable(wb,sheet="results",
+               x = processed_res %>% 
+                 as.data.frame() %>%
+                 filter( abs(c_intercept) <3.2  | is.na(c_intercept)))
+
+writeDataTable(wb,sheet="sample_size",
+               x = df_sample_size %>% 
+                 mutate(type = case_when(type=='as' ~'Asymptotic',
+                                         type == 'bb' ~ "Bayesian",
+                                         type == 'ob' ~ "Ordinary")) %>% 
+                 mutate(type=factor(type,c("Bayesian","Ordinary","Asymptotic"))))
+
+writeDataTable(wb,sheet="intercept",
+               x = df_int %>% 
+                 rename(intercept=c_intercept) %>% 
+                 mutate(type = case_when(type=='as' ~'Asymptotic',
+                                         type == 'bb' ~ "Bayesian",
+                                         type == 'ob' ~ "Ordinary")) %>% 
+                 mutate(type=factor(type,c("Bayesian","Ordinary","Asymptotic"))) %>% 
+                 filter(abs(intercept)<3.2))
+
+writeDataTable(wb,sheet="SD_noise",
+               x = df_slope %>% 
+                 rename(slope=noise_sd) %>% 
+                 mutate(type = case_when(type=='as' ~'Asymptotic',
+                                         type == 'bb' ~ "Bayesian",
+                                         type == 'ob' ~ "Ordinary")) %>% 
+                 mutate(type=factor(type,c("Bayesian","Ordinary","Asymptotic"))))
+
+saveWorkbook(wb,"perturb_sim_results_updated.xlsx",overwrite = T)

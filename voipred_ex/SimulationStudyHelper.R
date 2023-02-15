@@ -124,7 +124,9 @@ process_results <- function()
         AVG(evpiv_ob1) AS EVPIv_ob1, AVG(evpiv_ob2) AS EVPIv_ob2, AVG(evpiv_ob3) AS EVPIv_ob3,
         AVG(evpiv_bb1) AS EVPIv_bb1, AVG(evpiv_bb2) AS EVPIv_bb2, AVG(evpiv_bb3) AS EVPIv_bb3,
         AVG(evpiv_as1) AS EVPIv_as1, AVG(evpiv_as2) AS EVPIv_as2, AVG(evpiv_as3) AS EVPIv_as3,
-        SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se1, SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se2, SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se3, 
+        SQRT(VARIANCE(evpiv_ob1)/count(*)) AS se_ob1, SQRT(VARIANCE(evpiv_ob2)/count(*)) AS se_ob2, SQRT(VARIANCE(evpiv_ob3)/count(*)) AS se_ob3, 
+        SQRT(VARIANCE(evpiv_bb1)/count(*)) AS se_bb1, SQRT(VARIANCE(evpiv_bb2)/count(*)) AS se_bb2, SQRT(VARIANCE(evpiv_bb3)/count(*)) AS se_bb3, 
+        SQRT(VARIANCE(evpiv_as1)/count(*)) AS se_as1, SQRT(VARIANCE(evpiv_as2)/count(*)) AS se_as2, SQRT(VARIANCE(evpiv_as3)/count(*)) AS se_as3, 
         AVG(p_useful1) AS p_useful1, AVG(p_useful2) AS p_useful2, AVG(p_useful3) AS p_useful3, 
         SQRT(VARIANCE(NB_model1-MAX(NB_all1,0))) AS sddNB1, SQRT(VARIANCE(NB_model2-MAX(NB_all2,0))) AS sddNB2, SQRT(VARIANCE(NB_model3-MAX(NB_all3,0))) AS sddNB3, 
         AVG(NB_model1) AS NB_model1, AVG(NB_model2) AS NB_model2, AVG(NB_model3) AS NB_model3, 
@@ -135,4 +137,3 @@ process_results <- function()
   
   x
 }
-
