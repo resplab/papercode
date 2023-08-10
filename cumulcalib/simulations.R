@@ -1,25 +1,5 @@
 library(cumulcalib)
-
-main <- function()
-{
-  p<-1/(1+exp(-rnorm(1000)))
-  y<-rbinom(length(p),1,p)
-  res <- cumulcalib(y,p, method='twopart' , n_sim = 0)
-
-
-  res <- matrix(NA,1000,3)
-  for(i in 1:1000)
-  {
-    cat(".")
-    p<-1/(1+exp(-rnorm(1000)))
-    y<-rbinom(length(p),1,p)
-    tmp <- cumulcalib(y,p, method='twopart')
-    res[i,] <- tmp$details$twopart$pval
-  }
-}
-
-
-
+library(MASS)
 library(generalhoslem)
 library(progress)
 
@@ -337,37 +317,54 @@ process_sim_null_behavior <- function(x, type="qq", val=c('BM'="pval.BM",'BB'="p
 
 
 
-xs <- (1:3500)/1000
-cdf_a <- cdf_b1 <- cdf_b2 <- cdf_b3 <- cdf_c <- c(NA,lengths(xs))
-for(i in 1:length(xs))
+
+draw_pdfs <- function(eps=T)
 {
-  cdf_a[i] <- cumulcalib:::pMAD_BM(xs[i])
-  cdf_b1[i] <- cumulcalib:::pMAD_BM_c(xs[i],0.5, method=1)
-  cdf_b2[i] <- cumulcalib:::pMAD_BM_c(xs[i],1, method=1)
-  cdf_b3[i] <- cumulcalib:::pMAD_BM_c(xs[i],1.5, method=1)
-  cdf_c[i] <- cumulcalib:::pKolmogorov(xs[i])
+  if(eps)
+  {
+    setEPS()
+    postscript("./cumulcalib/pdfs.eps")
+  }
+
+  xs <- (1:3500)/1000
+  cdf_a <- cdf_b1 <- cdf_b2 <- cdf_b3 <- cdf_c <- c(NA,lengths(xs))
+  for(i in 1:length(xs))
+  {
+    cdf_a[i] <- cumulcalib:::pMAD_BM(xs[i])
+    cdf_b1[i] <- cumulcalib:::pMAD_BM_c(xs[i],0.5, method=1)
+    cdf_b2[i] <- cumulcalib:::pMAD_BM_c(xs[i],1, method=1)
+    cdf_b3[i] <- cumulcalib:::pMAD_BM_c(xs[i],1.5, method=1)
+    cdf_c[i] <- cumulcalib:::pKolmogorov(xs[i])
+  }
+
+
+  y_a <- cdf_a[-1]-cdf_a[-length(cdf_a)]
+  y_a[length(y_a)] <- 0
+  y_b1 <- cdf_b1[-1]-cdf_b1[-length(cdf_b1)]
+  y_b2 <- cdf_b2[-1]-cdf_b2[-length(cdf_b2)]
+  y_b3 <- cdf_b3[-1]-cdf_b3[-length(cdf_b3)]
+  y_c <- cdf_c[-1]-cdf_c[-length(cdf_c)]
+
+
+
+  plot(xs, y_a, type='l', ylim=c(0,max(c(y_a,y_c))), lwd=2, xlab="Statistic value", ylab="Density", col="blue")
+  # t1 <- cumulcalib:::qMAD_BM(0.95)
+  # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
+  # t1 <- cumulcalib:::qMAD_BM(0.5)
+  # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
+  y_b1[which(y_b1<=0)]<-NA
+  #lines(xs, y_b1, type='l', col='blue', lwd=1)
+  y_b2[which(y_b2<=0)]<-NA
+  #lines(xs, y_b2, type='l', col='blue', lwd=1)
+  y_b3[which(y_b3<=0)]<-NA
+  #lines(xs, y_b3, type='l', col='blue', lwd=1)
+  lines(xs, y_c, type='l', col='#F17720', lwd=2)
+  #t2 <- cumulcalib:::qKolmogorov(0.95)
+  #lines(c(t2,t2),c(0,1000),col="red",lty=3)
+
+  if(eps)
+  {
+    dev.off()
+  }
+
 }
-
-y_a <- cdf_a[-1]-cdf_a[-length(cdf_a)]
-y_a[length(y_a)] <- 0
-y_b1 <- cdf_b1[-1]-cdf_b1[-length(cdf_b1)]
-y_b2 <- cdf_b2[-1]-cdf_b2[-length(cdf_b2)]
-y_b3 <- cdf_b3[-1]-cdf_b3[-length(cdf_b3)]
-y_c <- cdf_c[-1]-cdf_c[-length(cdf_c)]
-
-
-
-plot(xs, y_a, type='l', ylim=c(0,max(c(y_a,y_c))), lwd=2, xlab="Statistic value", ylab="Density", col="blue")
-# t1 <- cumulcalib:::qMAD_BM(0.95)
-# lines(c(t1,t1),c(0,1000),lty=3, col="blue")
-# t1 <- cumulcalib:::qMAD_BM(0.5)
-# lines(c(t1,t1),c(0,1000),lty=3, col="blue")
-y_b1[which(y_b1<=0)]<-NA
-#lines(xs, y_b1, type='l', col='blue', lwd=1)
-y_b2[which(y_b2<=0)]<-NA
-#lines(xs, y_b2, type='l', col='blue', lwd=1)
-y_b3[which(y_b3<=0)]<-NA
-#lines(xs, y_b3, type='l', col='blue', lwd=1)
-lines(xs, y_c, type='l', col='#F17720', lwd=2)
-#t2 <- cumulcalib:::qKolmogorov(0.95)
-#lines(c(t2,t2),c(0,1000),col="red",lty=3)
