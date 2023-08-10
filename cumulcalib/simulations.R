@@ -229,7 +229,7 @@ process_detailed_sim_results_graph<-function(x, detailed=F, n_col=5, dec_points=
       level3_values <- this_data[,1]
       values <- as.vector(rbind(t(this_data)[-1,],0))
       bp<-barplot(values,xaxt='n', yaxt='n', space=0, ylim=c(-0.25,1.6),col=c(my_palette,rgb(1,0,0)))
-      text(x=0.4+c(0:17)*1,y=values+0.25,ifelse(values==0,"",round(values,2)),cex=1, srt=90)
+      text(x=0.4+c(0:14)*1,y=values+0.25,ifelse(values==0,"",round(values,2)),cex=1, srt=90)
       text(x=c(1, 7 ,12),y=-0.1,paste(level3_values),cex=1.5)
       text(x=5,y=1.5,paste0(" a=", fractions(i)," | b=", fractions(j)),cex=1.5,col="#600000")
     }

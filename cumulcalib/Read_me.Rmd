@@ -17,7 +17,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 * The case study results can be reproduced by running the case_study.R file. 
  
-  + Note that this study needs the voipred package to access the gusto data. Please install the development version of the cumulcalib package (e.g., via remotes::install_github("https://github.com/resplab/voipred"))
+  + Note that this study needs the predtools package (development version) to access the gusto data. Please install the development version of the predtools package (e.g., via remotes::install_github("https://github.com/resplab/predtools"))
 
   + The case_study.qmd markdown file will generate all the results of the case study.
 
