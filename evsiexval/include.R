@@ -4,7 +4,7 @@ library(pROC)
 library(sqldf)
 
 
-set.seed(123) #123 #3344 #123456
+set.seed(123)
 
 my_format <- function(val, n_digits=4)
 {
