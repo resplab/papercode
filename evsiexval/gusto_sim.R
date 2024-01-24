@@ -1,4 +1,4 @@
-setwd("C:/Users/msafavi/static/GitRepos/EVSIExVal/analysis")
+#Make sure you set the work directly here if needed.
 
 source("include.R")
 
