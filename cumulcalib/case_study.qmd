@@ -6,7 +6,7 @@ editor: visual
 
 ## Cast Study (GUSTO-I)
 
-## 2023.08.07
+## 2024.03.15
 
 ## Running Code
 
@@ -57,10 +57,11 @@ res22$auc
 
 ```{r}
 plot(res12$calib$calibration_plot)
+plot(res12$scalib)
 
-plot(res12$cumul_calib,method="BM")
+plot(res12$cumul_calib,method="BM",y2axis=F)
 summary(res12$cumul_calib,method="BM")
-plot(res12$cumul_calib, method="BB")
+plot(res12$cumul_calib, method="BB",y2axis=F)
 summary(res12$cumul_calib, method="BB")
 
 res12$HL
@@ -72,10 +73,10 @@ One-part test interpretation: Location was at index `r res12$cumul_calib$loc`, c
 
 ```{r}
 plot(res22$calib$calibration_plot)
-
-plot(res22$cumul_calib,method="BM")
+plot(res22$scalib)
+plot(res22$cumul_calib,method="BM",y2axis=F)
 summary(res22$cumul_calib,method="BM")
-plot(res22$cumul_calib, method="BB")
+plot(res22$cumul_calib, method="BB",y2axis=F)
 summary(res22$cumul_calib, method="BB")
 
 res22$HL
