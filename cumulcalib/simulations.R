@@ -16,10 +16,12 @@ aux <- list()
 
 
 
+
 #This is the simulation code for investigating the null-behavior of the tests
-sim_null_behavior <- function(b0s=c(-2,-1,0), sample_sizes=c(50, 100, 250, 1000), n_sim=10000)
+sim_null_behavior <- function(b0s=c(-2,-1,0), sample_sizes=c(50, 100, 250, 1000), n_sim=10000, seed=1)
 {
-  columns <- c("i_sim","sample_size", "b0", "pval.BM", "pval.BM2","pval.BB")
+  set.seed(seed)
+  columns <- c("i_sim","sample_size", "b0", "pval.BM", "pval.BB")
   out<-as.data.frame(matrix(NA, nrow =n_sim*length(sample_sizes)*length(b0s),ncol=length(columns)))
   colnames(out) <- columns
 
@@ -36,11 +38,11 @@ sim_null_behavior <- function(b0s=c(-2,-1,0), sample_sizes=c(50, 100, 250, 1000)
         o <- order(logit_pi)
         logit_pi <- logit_pi[o]
         pi <- 1/(1+exp(-logit_pi))
-        y=rbinom(sample_size,size = 1,prob = pi)
+        y=rbinom(sample_size,size=1, prob=pi)
         #tmp1 <- cumulcalib(y, pi, ordered = T, n_sim=10000)
         tmp <- cumulcalib(y, pi, ordered = T)
 
-        out[index,] <- c(i,sample_size,b0, tmp$by_metho$BM$pval, tmp$by_metho$BM2$pval, tmp$by_method$BB$pval)
+        out[index,] <- c(i, sample_size, b0, tmp$by_metho$BM$pval, tmp$by_method$BB$pval)
         index <- index+1
       }
     }
@@ -48,6 +50,7 @@ sim_null_behavior <- function(b0s=c(-2,-1,0), sample_sizes=c(50, 100, 250, 1000)
   }
   out
 }
+
 
 
 
@@ -114,6 +117,14 @@ process_sim_null_behavior <- function(x, type="qq", val=c('BM'="pval.BM",'BB'="p
       }
   }
 }
+
+
+#saveRDS(res000, "M:/Projects/2023/Project.CumulCalib/sealedResults/2024.03.18/res_null.RDS")
+# res <- readRDS(paste0(path_to_results,"res_null.RDS"))
+# setEPS()
+# postscript("./res_null.eps")
+# process_sim_null_behavior(res)
+# dev.off()
 
 
 
