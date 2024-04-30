@@ -1,0 +1,309 @@
+---
+title: "Patient-informed treatment thresholds"
+format: html
+editor: visual
+author: Mohsen Sadatsafavi 
+date: April 29, 2024 
+---
+
+```{r}
+settings <- list(
+  dce_source="pooled",
+  n_sim=10000,
+  ci=F,
+  voi=F
+)
+```
+
+```{r echo=FALSE}
+library (mvtnorm)
+
+odds <- function(x) {x/(1-x)}
+anti_odds <- function(x) {x/(1+x)}
+logit <- function(x) {log(odds(x))}
+
+```
+
+# DCE results
+
+Attribute orders: 1. Severe Lung attack 2. Moderate Lung attack 3. Major side effect 4. Minor side effect
+
+```{r}
+attr_names <- c('SE','ME','HL','GI')
+
+betas_pooled <- list(
+  mu=c(-0.0717416, -0.0283542, -0.0846835, -0.0181352),
+  covmat=matrix(c(0.0000086110,	0.0000005017,	0.0000065460,	0.0000014220,
+                  0.0000005017,	0.0000037480,	0.0000003934,	0.0000008820,
+                  0.0000065460,	0.0000003934,	0.0000193700,	0.0000017500,
+                  0.0000014220,	0.0000008820,	0.0000017500,	0.0000030170
+  ),nrow=4))
+
+
+betas_copd <- list(
+  mu=c(-0.0565501, -0.0253486, -0.0807761, -0.0150339),
+  
+  covmat=matrix(c(0.0000201800,	0.0000013160,	0.0000184700,	0.0000045580,
+                  0.0000013160,	0.0000077010,	0.0000006628,	0.0000022490,
+                  0.0000184700,	0.0000006628,	0.0000577300,	0.0000051100,
+                  0.0000045580,	0.0000022490,	0.0000051100,	0.0000086650
+  ),nrow=4))
+
+
+
+betas_genpop <- list(
+    mu=c(-.0820105, -.0309518, -.0877532, -.0203261),
+    covmat=matrix(c(0.0000145600,	0.0000009249,	0.0000098190,	0.0000017450,
+                    0.0000009249,	0.0000071730,	0.0000007213,	0.0000014790,
+                    0.0000098190,	0.0000007213,	0.0000287100,	0.0000024510,
+                    0.0000017450,	0.0000014790,	0.0000024510,	0.0000045650
+  ),nrow=4))
+
+
+```
+
+```{r echo=FALSE}
+recover_gamma_from_upper_ci_bound <- function(mu, upper_ci)
+{
+  my_pgamma <- function(x, mu, v)
+  {
+    beta <- mu/v
+    alpha <- mu*beta
+
+    pgamma(x, shape=alpha, rate=beta)
+  }
+
+  f <- function(x) {((1-my_pgamma(upper_ci, mu=mu, v=x)) - 0.975)^2}
+
+  res <- optimize(f, interval=c(0,100))
+
+  v <- res$minimum
+
+  beta <- mu/v
+  alpha <- mu*beta
+
+  list(alpha=alpha,beta=beta)
+}
+
+
+
+
+evidence <- list(
+  betas = if(settings$dce_source=="copd") {betas_copd} else if(settings$dce_source=="genpop") {betas_genpop} else {betas_pooled},
+  rr_exac = list(log_mu=log(0.77), se=(log(0.89)-log(0.67))/2/1.96), #Treatment effect
+  z = list(alpha=22, beta=100-22), #Probability of exacerbation being severe severe (beta distibrution)
+
+  inc_hearing_loss = recover_gamma_from_upper_ci_bound(mu=0.023, upper_ci=0.035),
+  rr_hearing_loss = list(log_mu=log(1.168), se=(log(1.325)-log(1.030))/2/1.96),
+  prev_gi_syms = list(alpha=28945,beta=58768),
+  or_gi_syms = list(logit_mu=log(1.187), se=(log(1.849)-log(0.761))/2/1.96)
+)
+
+
+
+
+
+
+
+generate_input_params <- function(n_sim=0)
+{
+  params <- list()
+
+  if(n_sim==0)
+  {
+    params$betas <- evidence$betas$mu
+    params$rr_exac <- exp(evidence$rr_exac$log_mu)  #log_normal
+    params$z <- evidence$z$alpha/(evidence$z$alpha+evidence$z$beta) #beta
+    params$inc_hearing_loss <- evidence$inc_hearing_loss$alpha/evidence$inc_hearing_loss$beta #gamma
+    params$rr_hearing_loss <- exp(evidence$rr_hearing_loss$log_mu) #log_normal
+    params$prev_gi_syms <- evidence$prev_gi_syms$alpha/(evidence$prev_gi_syms$alpha+evidence$prev_gi_syms$beta) #beta
+    params$or_gi_syms <- exp(evidence$or_gi_syms$log_mu) #log_normal
+  }
+  else
+  {
+    params$betas <- rmvnorm(n_sim, evidence$betas$mu, evidence$betas$covmat)
+    params$rr_exac <- exp(rnorm(n_sim, evidence$rr_exac$log_mu, evidence$rr_exac$se)) #log_normal
+    params$z <- rbeta(n_sim,evidence$z$alpha,evidence$z$beta) #beta
+    params$inc_hearing_loss <- rgamma(n_sim, evidence$inc_hearing_loss$alpha, evidence$inc_hearing_loss$beta) #gamma
+    params$rr_hearing_loss <- exp(rnorm(n_sim, evidence$rr_hearing_loss$log_mu, evidence$rr_hearing_loss$se)) #log_normal
+    params$prev_gi_syms <- rbeta(n_sim,evidence$prev_gi_syms$alpha, evidence$prev_gi_syms$beta) #beta
+    params$or_gi_syms <- exp(rnorm(n_sim, evidence$or_gi_syms$logit_mu, evidence$or_gi_syms$se)) #log_normal
+  }
+
+  params
+}
+
+
+#Calculates marginal rate of substitution and 95%CI
+MRS <- function(betas)
+{
+  mrs <- evidence$betas$mu/evidence$betas$mu[1]
+  ratios <- betas/betas[,1]
+  names(mrs) <- colnames(ratios) <- attr_names
+  
+  list(mu=mrs, ci=apply(ratios,2,quantile,c(0.025,0.975)))
+}
+
+
+
+#Returns INB at threshold x. If n_sim=0 returns deterministic results
+#It is vectorized on params not x so loop over x values please!
+INB <- function(x, n_sim, seed=1)
+{
+  set.seed(seed)
+  INB <- p_uptake <- matrix(NA, nrow = n_sim, ncol = length(x))
+  ps0 <- ps1 <- matrix(NA, nrow=max(n_sim,1), ncol=4)
+  
+  params <- generate_input_params(n_sim)
+
+  dps <- matrix(NA, nrow=max(n_sim,1), ncol=4)
+
+  for(i in 1:length(x))
+  {
+    ps0[,1] <- (1-(1-x[i])^params$z)
+    ps0[,2] <- (1-(1-x[i])^(1-params$z))
+    ps0[,3] <- (1-exp(-params$inc_hearing_loss))
+    ps0[,4] <- params$prev_gi_syms
+    
+    ps1[,1] <- (1-(1-x[i])^(params$rr_exac*params$z))
+    ps1[,2] <- (1-(1-x[i])^(params$rr_exac*(1-params$z)))
+    ps1[,3] <- (1-exp(-params$inc_hearing_loss)^params$rr_hearing_loss)
+    ps1[,4] <- (params$prev_gi_syms*params$or_gi_syms)/(1-params$prev_gi_syms+params$prev_gi_syms*params$or_gi_syms)
+    
+    # dps[,1] <- (1-(1-x[i])^(params$rr_exac*params$z)) - (1-(1-x[i])^params$z)
+    # dps[,2] <- (1-(1-x[i])^(params$rr_exac*(1-params$z))) - (1-(1-x[i])^(1-params$z))
+    # dps[,3] <- (1-exp(-params$inc_hearing_loss)^params$rr_hearing_loss) - (1-exp(-params$inc_hearing_loss))
+    # dps[,4] <- (params$prev_gi_syms*params$or_gi_syms)/(1-params$prev_gi_syms+params$prev_gi_syms*params$or_gi_syms) - params$prev_gi_syms
+
+    INB[,i] <- rowSums(params$betas*(ps1-ps0)*100)
+    
+    A <- exp(rowSums(params$betas*(ps0*100)))
+    B <- exp(rowSums(params$betas*(ps1*100)))
+    p_uptake[,i] <- B/(A+B)
+  }
+
+  list(params=params, INB=INB, p_uptake=p_uptake)
+}
+
+```
+
+#All parameters used in this analysis
+
+```{r echo=FALSE}
+deparse(evidence)
+```
+
+## Betas
+
+```{r echo=FALSE}
+require(knitr)
+
+mu <- format(evidence$betas$mu, digits = 3)
+se <- format(sqrt(diagonals(evidence$betas$covmat)), digits=2)
+data.frame(attr_names,mu,se)
+
+```
+
+# Main analysis
+
+```{r}
+xs <- (0:99)/100
+res <- INB(xs,settings$n_sim)
+
+ys <- res$INB
+zs <- res$p_uptake
+
+i1 <-which.min(colMeans(ys)^2)
+
+ys_mean <- colMeans(ys)
+ys_ci <- apply(ys, 2, FUN = quantile, c(0.025,0.975))
+
+plot(xs,ys_mean,xlab='Moderate or Severe Exacerbation Risk',ylab='Expected Incremental Net Benefit', type='l', col='red', lwd=2, ylim=c(min(0,min(ys_mean)),max(ys_mean)))
+lines(c(0,1),c(0,0),type='l', col='black')
+lines(c(xs[i1],xs[i1]),c(-100,100), col='gray', lty=3)
+if(settings$ci)
+{
+  lines(xs,ys_ci[1,], type='l', col='gray', lwd=1)
+  lines(xs,ys_ci[2,], type='l', col='gray', lwd=1)
+}
+```
+
+Optimal treatment threshold: `r xs[i1]`
+
+# CEAC
+
+```{r}
+ps <- apply(ys, 2, FUN = function(x) {mean(x>0)})
+i2 <- which.min((ps-0.9)^2)
+plot(xs,ps,type='l',xlab="Moderate or Severe Exacerbation Risk", ylab="Probability of Positive Incremental Net Benefit", lwd=2, col='red', ylim=c(0,1))
+lines(c(0,1),c(0,0),type='l', col='black')
+lines(c(xs[i1],xs[i1]),c(-100,100), col='gray', lty=3)
+```
+
+P(INB\>0) at 0 thresholds `r ps[1]` P(INB\>0) at optimal thresholds `r ps[i1]` Threshold where P(INB\>0)=0.9 `r xs[i2]`
+
+## Marginal rate of substitution
+
+```{r}
+require(knitr)
+mrs <- MRS(res$params$betas)
+kable(mrs$mu)
+
+kable(mrs$ci)
+```
+
+# VoI (if enabled)
+
+```{r echo=FALSE}
+library(voi)
+
+
+if(settings$voi)
+{
+  
+  inputs <- as.data.frame(res$params)
+  outputs <- as.data.frame(cbind(ys[,i1],0))
+  evpi <- mean(apply(outputs, 1, max))-max(colMeans(outputs))
+  evppis <- rep(NA,4)
+  
+  evppis[1] <- voi::evppi(outputs, inputs = inputs, pars = c("betas.1", "betas.2","betas.3","betas.4"))$evppi
+  evppis[2] <- voi::evppi(outputs, inputs = inputs, pars = c("rr_exac", "z"))$evppi
+  evppis[3] <- voi::evppi(outputs, inputs = inputs, pars = c("inc_hearing_loss", "rr_hearing_loss"))$evppi
+  evppis[4] <- voi::evppi(outputs, inputs = inputs, pars = c("prev_gi_syms", "or_gi_syms"))$evppi
+
+  voi_res <- voi::evppi(outputs=as.data.frame(cbind(ys[,i1],0)), inputs = as.data.frame(res$params), pars=as.list(names(inputs)))
+  bp_voi <- c('All (EVPI)'=unname(evpi), NA,
+              'DCE betas'=unname(evppis[1]), 'DCE beta '=voi_res$evppi[1:4], NA,
+              'Treatment effect'=unname(evppis[2]), r=voi_res$evppi[5], z=voi_res$evppi[6], NA,
+              'Treatment harm-HL'=unname(evppis[3]),'HL0'=voi_res$evppi[7], 'HL rr'=voi_res$evppi[7],  NA,
+              'Treatment harm-HL'=unname(evppis[4]), 'GI0'=voi_res$evppi[9], 'GI or'=voi_res$evppi[10])
+  
+  bp_data <- data.frame(name=names(bp_voi), value=bp_voi)
+  
+  
+  barplot(height=bp_data$value, names=bp_data$name, col=c('black',
+                                                          'white', 'green', rep('gray',4),
+                                                          'white', 'blue', rep('gray',2),
+                                                          'white', 'orange', rep('gray',2),
+                                                          'white', 'red', rep('gray',2)),
+          las=2, ylab="Expected Net Benefit Loss")
+  
+  
+  # voi_ress <- t(as.data.frame(voi_res))[-1,]
+  # for(i in 1:dim(ys)[2])
+  # {
+  #   cat('.')
+  #   outputs=as.data.frame(cbind(ys[,i],0))
+  #   tmp <- do_voi(outputs)
+  #   voi_ress <- rbind(voi_ress,tmp)
+  # }
+  # 
+  # plot(xs, voi_ress[,1], type='l', lwd=2, xlab = "Threshold", ylab = "VoI")
+  # lines(xs, voi_ress[,2], type='l', col='green', lw=2)
+  # lines(xs, voi_ress[,3], type='l', col='blue', lw=2)
+  # lines(xs,voi_ress[,4], type='l', col='orange', lw=2)
+  # lines(xs,voi_ress[,5], type='l', col='red', lw=2)
+  # legend(0.4,max(voi_ress), legend = c("All (EVPI)", "DCE coefficients", "Treatment effect", "Treatment harm-HL", "Treatment harm-GI"), col = c('black','green','blue','orange','red'), lty=rep(1,4))
+}
+###
+```
