@@ -1,5 +1,5 @@
 ---
-title: "Patient-informed treatment thresholds"
+title: "Stakeholder-informed treatment thresholds"
 format: html
 editor: visual
 author: Mohsen Sadatsafavi 
@@ -8,7 +8,7 @@ date: April 29, 2024
 
 ```{r}
 settings <- list(
-  dce_source="pooled",
+  dce_source="copd",  #pooled: all participants, copd: copd patients, genpop: general public
   n_sim=10000,
   ci=F,
   voi=F
@@ -252,58 +252,3 @@ kable(mrs$mu)
 kable(mrs$ci)
 ```
 
-# VoI (if enabled)
-
-```{r echo=FALSE}
-library(voi)
-
-
-if(settings$voi)
-{
-  
-  inputs <- as.data.frame(res$params)
-  outputs <- as.data.frame(cbind(ys[,i1],0))
-  evpi <- mean(apply(outputs, 1, max))-max(colMeans(outputs))
-  evppis <- rep(NA,4)
-  
-  evppis[1] <- voi::evppi(outputs, inputs = inputs, pars = c("betas.1", "betas.2","betas.3","betas.4"))$evppi
-  evppis[2] <- voi::evppi(outputs, inputs = inputs, pars = c("rr_exac", "z"))$evppi
-  evppis[3] <- voi::evppi(outputs, inputs = inputs, pars = c("inc_hearing_loss", "rr_hearing_loss"))$evppi
-  evppis[4] <- voi::evppi(outputs, inputs = inputs, pars = c("prev_gi_syms", "or_gi_syms"))$evppi
-
-  voi_res <- voi::evppi(outputs=as.data.frame(cbind(ys[,i1],0)), inputs = as.data.frame(res$params), pars=as.list(names(inputs)))
-  bp_voi <- c('All (EVPI)'=unname(evpi), NA,
-              'DCE betas'=unname(evppis[1]), 'DCE beta '=voi_res$evppi[1:4], NA,
-              'Treatment effect'=unname(evppis[2]), r=voi_res$evppi[5], z=voi_res$evppi[6], NA,
-              'Treatment harm-HL'=unname(evppis[3]),'HL0'=voi_res$evppi[7], 'HL rr'=voi_res$evppi[7],  NA,
-              'Treatment harm-HL'=unname(evppis[4]), 'GI0'=voi_res$evppi[9], 'GI or'=voi_res$evppi[10])
-  
-  bp_data <- data.frame(name=names(bp_voi), value=bp_voi)
-  
-  
-  barplot(height=bp_data$value, names=bp_data$name, col=c('black',
-                                                          'white', 'green', rep('gray',4),
-                                                          'white', 'blue', rep('gray',2),
-                                                          'white', 'orange', rep('gray',2),
-                                                          'white', 'red', rep('gray',2)),
-          las=2, ylab="Expected Net Benefit Loss")
-  
-  
-  # voi_ress <- t(as.data.frame(voi_res))[-1,]
-  # for(i in 1:dim(ys)[2])
-  # {
-  #   cat('.')
-  #   outputs=as.data.frame(cbind(ys[,i],0))
-  #   tmp <- do_voi(outputs)
-  #   voi_ress <- rbind(voi_ress,tmp)
-  # }
-  # 
-  # plot(xs, voi_ress[,1], type='l', lwd=2, xlab = "Threshold", ylab = "VoI")
-  # lines(xs, voi_ress[,2], type='l', col='green', lw=2)
-  # lines(xs, voi_ress[,3], type='l', col='blue', lw=2)
-  # lines(xs,voi_ress[,4], type='l', col='orange', lw=2)
-  # lines(xs,voi_ress[,5], type='l', col='red', lw=2)
-  # legend(0.4,max(voi_ress), legend = c("All (EVPI)", "DCE coefficients", "Treatment effect", "Treatment harm-HL", "Treatment harm-GI"), col = c('black','green','blue','orange','red'), lty=rep(1,4))
-}
-###
-```
