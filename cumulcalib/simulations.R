@@ -95,7 +95,7 @@ process_sim_null_behavior <- function(x, type="qq", val=c('BM'="pval.BM",'BB'="p
             lines(xs,ys,col=my_palette[k], lwd=2)
           }
           p <- round(mean(this_data<0.05),digits = 3)
-          text(0.2,0.7-k/10,paste0(names(val)[k],":",p))
+          text(0.2,0.7-k/10,paste0(names(val)[k],":",paste0(format(p*100,nsmall=1),"%")))
         }
   }
   else
@@ -119,11 +119,11 @@ process_sim_null_behavior <- function(x, type="qq", val=c('BM'="pval.BM",'BB'="p
 }
 
 
-#saveRDS(res000, "M:/Projects/2023/Project.CumulCalib/sealedResults/2024.03.18/res_null.RDS")
-# res <- readRDS(paste0(path_to_results,"res_null.RDS"))
+# saveRDS(res_null, "M:/Projects/2023/Project.CumulCalib/sealedResults/2024.05.21/res_null.RDS")
+# res_null <- readRDS(paste0(path_to_results,"res_null.RDS"))
 # setEPS()
 # postscript("./res_null.eps")
-# process_sim_null_behavior(res)
+# process_sim_null_behavior(res_null)
 # dev.off()
 
 
@@ -132,7 +132,7 @@ process_sim_null_behavior <- function(x, type="qq", val=c('BM'="pval.BM",'BB'="p
 
 #The 'linear' miscalibration simulation
 #This function returns a data frame each row containing the results from one loop of Monte Carlo simulations
-detailed_sim_linear<-function(sample_sizes=c(100,250,1000), X_dist=c(0,1), b0s=c(-0.25,-0.125,0,0.125,0.25),b1s=c(0.5,0.75,1,1.5,2),n_sim=2500, GRuse=FALSE, seed=1)
+detailed_sim_linear<-function(sample_sizes=c(100,250,1000), X_dist=c(0,1), b0s=c(-0.25,-0.125,0,0.125,0.25),b1s=c(0.5,3/4,1,4/3,2),n_sim=2500, GRuse=FALSE, seed=1)
 {
   set.seed(seed)
 
@@ -209,7 +209,7 @@ detailed_sim_linear<-function(sample_sizes=c(100,250,1000), X_dist=c(0,1), b0s=c
 #The 'power' miscalibration simulation
 #This function returns a data frame each row containing the results from one loop of Monte Carlo simulations
 #X_dist:mean and SD of the distribution of the simple predictor. If NULL, then directly samples pi from standard uniform.
-detailed_sim_power<-function(sample_sizes=c(100,250,500), X_dist=c(0,1), b0s=c(0,0.125,0.25), b1s=c(1/2,3/4,1,4/3,2), b2s=NULL, n_sim=2500, GRuse=FALSE, seed=1)
+detailed_sim_power<-function(sample_sizes=c(100,250,500), X_dist=c(0,1), b0s=c(-0.25,-0.125,0,0.125,0.25),b1s=c(0.5,3/4,1,4/3,2), b2s=NULL, n_sim=2500, GRuse=FALSE, seed=1)
 {
   set.seed(seed)
   columns <- c("i_sim","sample_size", "b0", "b1", "pval.HLT","pval.LRT", "pval.BM", "pval.BB")
@@ -329,77 +329,78 @@ process_detailed_sim_results_graph<-function(x, detailed=F, n_col=5, dec_points=
       values <- as.vector(rbind(t(this_data)[-1,],0))
       bp<-barplot(values,xaxt='n', yaxt='n', space=0, ylim=c(-0.25,1.6),col=c(my_palette,rgb(1,0,0)))
       text(x=0.4+c(0:14)*1,y=values+0.25,ifelse(values==0,"",round(values,2)),cex=0.9, srt=90)
+      text(x=6,y=1.5,paste0(" a=", fractions(i)," | b=", fractions(j)),cex=1.5,col="#404040")
+      #if(i==l1_vals[length(l1_vals)])
       text(x=c(1, 7 ,12),y=-0.1,paste(level3_values),cex=1.5)
-      text(x=6,y=1.5,paste0(" a=", fractions(i)," | b=", fractions(j)),cex=1.5,col="#600000")
     }
 }
 
 
-# res <- readRDS(paste0(path_to_results,"res_lin.RDS"))
-# setEPS()
-# postscript("./res_lin.eps")
-# process_detailed_sim_results_graph(res)
-# dev.off()
+res_lin <- readRDS(paste0(path_to_results,"res_lin.RDS"))
+setEPS()
+postscript("./res_lin.eps")
+process_detailed_sim_results_graph(res_lin)
+dev.off()
+
+
+res_pow <- readRDS(paste0(path_to_results,"res_pow.RDS"))
+setEPS()
+postscript("./res_pow.eps")
+process_detailed_sim_results_graph(res_pow)
+dev.off()
+
+
 #
 #
 #
-# setEPS()
-# postscript("./res_pow.eps")
-# process_detailed_sim_results_graph(res)
-# dev.off()
-
-
-
-
-
-#Draws the PDF Of the null distirbutions of the BM and BB tests. This is no longer reported in the manuscript.
-draw_pdfs <- function(eps=T)
-{
-  if(eps)
-  {
-    setEPS()
-    postscript("./cumulcalib/pdfs.eps")
-  }
-
-  xs <- (1:3500)/1000
-  cdf_a <- cdf_b1 <- cdf_b2 <- cdf_b3 <- cdf_c <- c(NA,lengths(xs))
-  for(i in 1:length(xs))
-  {
-    cdf_a[i] <- cumulcalib:::pMAD_BM(xs[i])
-    cdf_b1[i] <- cumulcalib:::pMAD_BM_c(xs[i],0.5, method=1)
-    cdf_b2[i] <- cumulcalib:::pMAD_BM_c(xs[i],1, method=1)
-    cdf_b3[i] <- cumulcalib:::pMAD_BM_c(xs[i],1.5, method=1)
-    cdf_c[i] <- cumulcalib:::pKolmogorov(xs[i])
-  }
-
-
-  y_a <- cdf_a[-1]-cdf_a[-length(cdf_a)]
-  y_a[length(y_a)] <- 0
-  y_b1 <- cdf_b1[-1]-cdf_b1[-length(cdf_b1)]
-  y_b2 <- cdf_b2[-1]-cdf_b2[-length(cdf_b2)]
-  y_b3 <- cdf_b3[-1]-cdf_b3[-length(cdf_b3)]
-  y_c <- cdf_c[-1]-cdf_c[-length(cdf_c)]
-
-
-
-  plot(xs, y_a, type='l', ylim=c(0,max(c(y_a,y_c))), lwd=2, xlab="Statistic value", ylab="Density", col="blue")
-  # t1 <- cumulcalib:::qMAD_BM(0.95)
-  # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
-  # t1 <- cumulcalib:::qMAD_BM(0.5)
-  # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
-  y_b1[which(y_b1<=0)]<-NA
-  #lines(xs, y_b1, type='l', col='blue', lwd=1)
-  y_b2[which(y_b2<=0)]<-NA
-  #lines(xs, y_b2, type='l', col='blue', lwd=1)
-  y_b3[which(y_b3<=0)]<-NA
-  #lines(xs, y_b3, type='l', col='blue', lwd=1)
-  lines(xs, y_c, type='l', col='#F17720', lwd=2)
-  #t2 <- cumulcalib:::qKolmogorov(0.95)
-  #lines(c(t2,t2),c(0,1000),col="red",lty=3)
-
-  if(eps)
-  {
-    dev.off()
-  }
-
-}
+# #Draws the PDF Of the null distirbutions of the BM and BB tests. This is no longer reported in the manuscript.
+# draw_pdfs <- function(eps=T)
+# {
+#   if(eps)
+#   {
+#     setEPS()
+#     postscript("./cumulcalib/pdfs.eps")
+#   }
+#
+#   xs <- (1:3500)/1000
+#   cdf_a <- cdf_b1 <- cdf_b2 <- cdf_b3 <- cdf_c <- c(NA,lengths(xs))
+#   for(i in 1:length(xs))
+#   {
+#     cdf_a[i] <- cumulcalib:::pMAD_BM(xs[i])
+#     cdf_b1[i] <- cumulcalib:::pMAD_BM_c(xs[i],0.5, method=1)
+#     cdf_b2[i] <- cumulcalib:::pMAD_BM_c(xs[i],1, method=1)
+#     cdf_b3[i] <- cumulcalib:::pMAD_BM_c(xs[i],1.5, method=1)
+#     cdf_c[i] <- cumulcalib:::pKolmogorov(xs[i])
+#   }
+#
+#
+#   y_a <- cdf_a[-1]-cdf_a[-length(cdf_a)]
+#   y_a[length(y_a)] <- 0
+#   y_b1 <- cdf_b1[-1]-cdf_b1[-length(cdf_b1)]
+#   y_b2 <- cdf_b2[-1]-cdf_b2[-length(cdf_b2)]
+#   y_b3 <- cdf_b3[-1]-cdf_b3[-length(cdf_b3)]
+#   y_c <- cdf_c[-1]-cdf_c[-length(cdf_c)]
+#
+#
+#
+#   plot(xs, y_a, type='l', ylim=c(0,max(c(y_a,y_c))), lwd=2, xlab="Statistic value", ylab="Density", col="blue")
+#   # t1 <- cumulcalib:::qMAD_BM(0.95)
+#   # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
+#   # t1 <- cumulcalib:::qMAD_BM(0.5)
+#   # lines(c(t1,t1),c(0,1000),lty=3, col="blue")
+#   y_b1[which(y_b1<=0)]<-NA
+#   #lines(xs, y_b1, type='l', col='blue', lwd=1)
+#   y_b2[which(y_b2<=0)]<-NA
+#   #lines(xs, y_b2, type='l', col='blue', lwd=1)
+#   y_b3[which(y_b3<=0)]<-NA
+#   #lines(xs, y_b3, type='l', col='blue', lwd=1)
+#   lines(xs, y_c, type='l', col='#F17720', lwd=2)
+#   #t2 <- cumulcalib:::qKolmogorov(0.95)
+#   #lines(c(t2,t2),c(0,1000),col="red",lty=3)
+#
+#   if(eps)
+#   {
+#     dev.off()
+#   }
+#
+# }
