@@ -1,9 +1,9 @@
 ---
-title: "Stakeholder-informed treatment thresholds"
+title: "Patient-informed treatment thresholds"
 format: html
 editor: visual
 author: Mohsen Sadatsafavi 
-date: April 29, 2024 
+date: July 29, 2024
 ---
 
 ```{r}
@@ -220,7 +220,7 @@ ys_ci <- apply(ys, 2, FUN = quantile, c(0.025,0.975))
 
 plot(xs,ys_mean,xlab='Moderate or Severe Exacerbation Risk',ylab='Expected Incremental Net Benefit', type='l', col='red', lwd=2, ylim=c(min(0,min(ys_mean)),max(ys_mean)))
 lines(c(0,1),c(0,0),type='l', col='black')
-lines(c(xs[i1],xs[i1]),c(-100,100), col='gray', lty=3)
+lines(c(xs[i1],xs[i1]),c(-100,100), col='#404040', lty=2, lw=2)
 if(settings$ci)
 {
   lines(xs,ys_ci[1,], type='l', col='gray', lwd=1)
@@ -237,7 +237,7 @@ ps <- apply(ys, 2, FUN = function(x) {mean(x>0)})
 i2 <- which.min((ps-0.9)^2)
 plot(xs,ps,type='l',xlab="Moderate or Severe Exacerbation Risk", ylab="Probability of Positive Incremental Net Benefit", lwd=2, col='red', ylim=c(0,1))
 lines(c(0,1),c(0,0),type='l', col='black')
-lines(c(xs[i1],xs[i1]),c(-100,100), col='gray', lty=3)
+lines(c(xs[i1],xs[i1]),c(-100,100), col='#404040', lty=2, lw=2)
 ```
 
 P(INB\>0) at 0 thresholds `r ps[1]` P(INB\>0) at optimal thresholds `r ps[i1]` Threshold where P(INB\>0)=0.9 `r xs[i2]`
