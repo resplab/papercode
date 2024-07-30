@@ -105,9 +105,6 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <div class="cell">
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(knitr)</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="fu">source</span>(<span class="st">'case_study.R'</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
-<div class="cell-output cell-output-stderr">
-<pre><code>Warning: package 'predtools' was built under R version 4.3.3</code></pre>
-</div>
 </div>
 <p>Data size:</p>
 <div class="cell">
@@ -167,8 +164,8 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="model-1-small-dev" class="level4">
 <h4 class="anchored" data-anchor-id="model-1-small-dev">Model 1 (small dev)</h4>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb3"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">#summary(model1)</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coefficients</span>(model1),<span class="dv">3</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co">#summary(model1)</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coefficients</span>(model1),<span class="dv">3</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>     (Intercept)              age       milocOther    milocAnterior 
            0.365            0.076            0.460            0.157 
@@ -180,8 +177,8 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="model-2-full-dev" class="level4">
 <h4 class="anchored" data-anchor-id="model-2-full-dev">Model 2 (full dev)</h4>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">#summary(model2)</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coefficients</span>(model2),<span class="dv">3</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">#summary(model2)</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">coefficients</span>(model2),<span class="dv">3</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>     (Intercept)              age       milocOther    milocAnterior 
           -2.084            0.078            0.403            0.577 
@@ -194,11 +191,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="aucs" class="level3">
 <h3 class="anchored" data-anchor-id="aucs">AUCs</h3>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>res12<span class="sc">$</span>auc</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>res12<span class="sc">$</span>auc</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Area under the curve: 0.8099</code></pre>
 </div>
-<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>res22<span class="sc">$</span>auc</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>res22<span class="sc">$</span>auc</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Area under the curve: 0.8144</code></pre>
 </div>
@@ -209,45 +206,43 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="small-dev-full-val-12" class="level4">
 <h4 class="anchored" data-anchor-id="small-dev-full-val-12">Small dev, full val (12)</h4>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>calib<span class="sc">$</span>calibration_plot)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>calib<span class="sc">$</span>calibration_plot)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-6-1.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>scalib)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>scalib)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-6-2.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-6-3.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb14"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res12<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res12<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>[1] "C_n (mean calibration error): -0.00104175180593455"
-[1] "C* (maximum absolute cumulative calibration error): 0.00421961645987535"
-[1] "Method: One-part Brownian Motion (BM)"
-[1] "S* (test statistic for cumulative calibration error): 2.81511520967912"
-[1] "P-value: 0.00975195002512808"
-[1] "Location of maximum drift: 21623  | time value: 0.752446499725158  | predictor value: 0.231769680615466"</code></pre>
+<pre><code>C_n (mean calibration error): -0.00104175180593455
+C* (maximum absolute cumulative calibration error): 0.00421961645987535
+Method: One-part Brownian Motion (BM)
+S* (test statistic for cumulative calibration error): 2.81511520967912
+p-value: 0.00975195002512808
+Location of maximum drift: 21623  | time value: 0.752446499725158  | predictor value: 0.231769680615466</code></pre>
 </div>
-<div class="sourceCode cell-code" id="cb16"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb15"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res12<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-6-4.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb17"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res12<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb16"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res12<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>[1] "C_n (mean calibration error): -0.00104175180593455"
-[1] "C* (maximum absolute cumulative calibration error): 0.00421961645987535"
-[1] "Method: Two-part Brownian Bridge (BB)"
-[1] "S_n (Z score for mean calibration error) -0.695004245405677"
-[1] "B* (test statistic for maximum absolute bridged calibration error): 3.33806872142875"
-[1] "Component-wise p-values:"
-        mean     distance 
-4.870526e-01 4.193740e-10 
-[1] "Combined value (Fisher'smethod): 4.7615706932902e-09"
-[1] "Location of maximum drift: 21623  | time value: 0.752446499725158  | predictor value: 0.231769680615466"</code></pre>
+<pre><code>C_n (mean calibration error): -0.00104175180593455
+C* (maximum absolute cumulative calibration error): 0.00421961645987535
+Method: Two-part Brownian Bridge (BB)
+S_n (Z score for mean calibration error) -0.695004245405677
+B* (test statistic for maximum absolute bridged calibration error): 3.33806872142875
+Component-wise p-values: mean calibration=0.487052641011851 | Distance (bridged)=4.1937397998737e-10
+Combined p-value (Fisher's method): 4.7615706932902e-09
+Location of maximum drift: 21623  | time value: 0.752446499725158  | predictor value: 0.231769680615466</code></pre>
 </div>
-<div class="sourceCode cell-code" id="cb19"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>res12<span class="sc">$</span>HL</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>res12<span class="sc">$</span>HL</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>
     Hosmer and Lemeshow test (binary model)
@@ -261,45 +256,43 @@ X-squared = 47.141, df = 8, p-value = 1.441e-07</code></pre>
 <section id="full-dev-full-val-22" class="level4">
 <h4 class="anchored" data-anchor-id="full-dev-full-val-22">full dev, full val (22)</h4>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb21"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>calib<span class="sc">$</span>calibration_plot)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb20"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>calib<span class="sc">$</span>calibration_plot)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-7-1.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb22"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>scalib)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb21"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>scalib)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-7-2.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb23"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb22"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-7-3.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb24"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res22<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb23"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res22<span class="sc">$</span>cumul_calib,<span class="at">method=</span><span class="st">"BM"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>[1] "C_n (mean calibration error): -0.00156276638623442"
-[1] "C* (maximum absolute cumulative calibration error): 0.00200906446334097"
-[1] "Method: One-part Brownian Motion (BM)"
-[1] "S* (test statistic for cumulative calibration error): 1.29725651574825"
-[1] "P-value: 0.388886850369088"
-[1] "Location of maximum drift: 15245  | time value: 0.287796643081863  | predictor value: 0.0603447711748232"</code></pre>
+<pre><code>C_n (mean calibration error): -0.00156276638623442
+C* (maximum absolute cumulative calibration error): 0.00200906446334097
+Method: One-part Brownian Motion (BM)
+S* (test statistic for cumulative calibration error): 1.29725651574825
+p-value: 0.388886850369088
+Location of maximum drift: 15245  | time value: 0.287796643081863  | predictor value: 0.0603447711748232</code></pre>
 </div>
-<div class="sourceCode cell-code" id="cb26"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb25"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(res22<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>,<span class="at">y2axis=</span>F)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output-display">
 <p><img src="case_study_files/figure-html/unnamed-chunk-7-4.png" class="img-fluid" width="672"></p>
 </div>
-<div class="sourceCode cell-code" id="cb27"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res22<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb26"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(res22<span class="sc">$</span>cumul_calib, <span class="at">method=</span><span class="st">"BB"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>[1] "C_n (mean calibration error): -0.00156276638623442"
-[1] "C* (maximum absolute cumulative calibration error): 0.00200906446334097"
-[1] "Method: Two-part Brownian Bridge (BB)"
-[1] "S_n (Z score for mean calibration error) -1.00908104947695"
-[1] "B* (test statistic for maximum absolute bridged calibration error): 1.02844827843831"
-[1] "Component-wise p-values:"
-     mean  distance 
-0.3129358 0.2407444 
-[1] "Combined value (Fisher'smethod): 0.270143602790971"
-[1] "Location of maximum drift: 22402  | time value: 0.888235817046906  | predictor value: 0.333472525720666"</code></pre>
+<pre><code>C_n (mean calibration error): -0.00156276638623442
+C* (maximum absolute cumulative calibration error): 0.00200906446334097
+Method: Two-part Brownian Bridge (BB)
+S_n (Z score for mean calibration error) -1.00908104947695
+B* (test statistic for maximum absolute bridged calibration error): 1.02844827843831
+Component-wise p-values: mean calibration=0.312935765573505 | Distance (bridged)=0.240744428186226
+Combined p-value (Fisher's method): 0.270143602790971
+Location of maximum drift: 22402  | time value: 0.888235817046906  | predictor value: 0.333472525720666</code></pre>
 </div>
-<div class="sourceCode cell-code" id="cb29"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a>res22<span class="sc">$</span>HL</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb28"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>res22<span class="sc">$</span>HL</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>
     Hosmer and Lemeshow test (binary model)
