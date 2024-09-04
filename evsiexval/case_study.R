@@ -1,9 +1,5 @@
-#Last update: January 23, 2024
-
 library(evsiexval)
-
-#Make sure you set the work directly here if needed.
-
+setwd("M:/Projects/2023/Project.EVSIexval/Analysis")
 source("include.R")
 
 
@@ -118,8 +114,8 @@ pdf(paste0(settings$output_dir,"DCA.pdf"), width=6, height=5)
   max_y <- max(0,NBh_all,NBh_model)
   min_y <- 0*min(0,NBh_all,NBh_model)
   par(mar=c(4, 4, 3, 0), xpd=TRUE)
-  plot(zs, NBh_all, col='darkgray', type='l', lwd=2, ylim=c(0,max_y), xlab="Risk threshold (z)", ylab="Net benefit")
-  lines(zs, zs*0, col='lightgray', type='l', lwd=2)
+  plot(zs[1:10], NBh_all[1:10], col='darkgray', type='l', lty=2, lwd=2, xlim=c(0,0.1), ylim=c(0,max_y), xlab="Risk threshold (z)", ylab="Net benefit")
+  lines(zs, zs*0, col='darkgray', type='l', lwd=2, lt=3)
   lines(zs, NBh_model, col='blue4', type='l', lwd=2)
   # ci_model <- apply(bs_NBh_model,MARGIN = 2,FUN = quantile, c(0.025,0.975))
   # lines(zs,ci_model[1,], type='l', col='gray', lt=2)
@@ -189,6 +185,48 @@ dev.off()
 
 
 
+### EVSI
+EVSIs <- NULL
+for(sample_size in settings$val_sample_size)
+{
+  for(z in settings$zs)
+  {
+    tmp <- val_data[1:sample_size,]
+    evidence <- list(prev=c(sum(tmp$Y), nrow(tmp)-sum(tmp$Y)),
+                     se=c(sum(tmp$Y*(tmp$pi>=z)),sum(tmp$Y)-sum(tmp$Y*(tmp$pi>=z))),
+                     sp=c(sum((1-tmp$Y)*(tmp$pi<z)),sum(1-tmp$Y)-sum((1-tmp$Y)*(tmp$pi<z)))
+    )
+    tmp <- EVSI_ag(evidence, z, settings$future_sample_sizes, n_sim=settings$n_sim)
+    EVSIs <- rbind(EVSIs, c(val_size=sample_size, z=z, EVPI=tmp$EVPI, EVSI=tmp$EVSI))
+  }
+}
+EVSIs <- as.data.frame(EVSIs)
+out$EVSIs <- EVSIs
+
+
+
+my_colors <- c('blue','red')
+evsi_cols <- which(substr(colnames(EVSIs),1,4)=="EVSI")
+for(z in settings$zs)
+{
+  i <- 1
+  for(sample_size in settings$val_sample_size)
+  {
+    #pdf(paste0(settings$output_dir,"EVSI_",sample_size,"_",z,".pdf"), width=7, height=5)
+    df <- sqldf(paste("SELECT * FROM EVSIs WHERE z=",z," AND val_size=",sample_size))
+    max_y <- max(df$EVPI)
+    par(las=2)
+    plot(c(0,settings$future_sample_sizes), c(0,df[1,evsi_cols]), type='l', ylim=c(0,max_y), xlab="Future sample size", ylab="EVSI", col=my_colors[i], xaxt="n")
+    axis(1, at=settings$future_sample_sizes, labels=settings$future_sample_sizes)
+    #title(paste(df$val_size, z))
+    lines(c(0,max(settings$future_sample_sizes)), c(df[1,'EVPI'],df[1,'EVPI']), col='gray')
+    #dev.off()
+    i <- i+1
+  }
+}
+
+
+
 
 
 #Scaled EVSI (V2 - combined)
@@ -203,7 +241,7 @@ pdf(paste0(settings$output_dir,"scaled_EVSI.pdf"), width=8, height=5)
   par(mar=c(4, 4, 3, 3), xpd=TRUE)
   plot(c(0,settings$future_sample_sizes)[1:5], (c(0,unlist(df[1,evsi_cols]))/scale)[1:5],
      type='l', ylim=c(0,max_y),
-     xlab="Future sample size",
+     xlab="Future sample size (N)",
      ylab="EVSI", col='red3', lwd=2, xaxt="n")
   axis(1, at=c(0,settings$future_sample_sizes), las=2)
   #title(paste(df$val_size, z))
@@ -248,6 +286,7 @@ entities$prev_full_dev <- mean(dev_data$day30)
 entities$prev_full_val <- mean(data_us$day30)
 entities$prev_val <- mean(val_data$day30)
 
+
 EVPI_02 <- as.numeric(out$EVSIs %>% filter(z==0.02 & val_size==min(settings$val_sample_size)) %>% select(EVPI))
 entities$EVPI_02 <- EVPI_02
 EVSI_02 <- as.numeric(out$EVSIs %>% filter(z==0.02 & val_size==min(settings$val_sample_size)) %>% select(EVSI2))
@@ -259,6 +298,7 @@ EVSI_01 <- as.numeric(out$EVSIs %>% filter(z==0.01 & val_size==min(settings$val_
 entities$EVSI_01 <- EVSI_01
 
 out$entities <- entities
+out$val_data <- val_data
 
 saveRDS(out,paste0(settings$output_dir, "case_study.RDS"))
 print(paste("Results saved at", settings$output_dir))
@@ -268,24 +308,4 @@ print(paste("Results saved at", settings$output_dir))
 
 
 
-#####################Older versions
-
-
-options(scipen=0)
-my_colors <- c('blue','red')
-for(z in settings$zs)
-{
-  i <- 1
-  for(sample_size in settings$val_sample_size)
-  {
-    df <- sqldf(paste("SELECT * FROM EVSIs WHERE z=",z," AND val_size=",sample_size))
-    max_y <- max(df$EVPI)
-    #pdf(paste0(settings$output_dir,"EVSI_",sample_size,"_",z,".pdf"), width=7, height=5)
-    plot(c(0,settings$future_sample_sizes), c(0,df[1,4:9]), type='l', ylim=c(0,max_y), xlab="Future sample size", ylab="EVSI", col=my_colors[i])
-    #title(paste(df$val_size, z))
-    lines(c(0,max(settings$future_sample_sizes)), c(df[1,'EVPI'],df[1,'EVPI']), col='gray')
-    #dev.off()
-    i <- i+1
-  }
-}
 

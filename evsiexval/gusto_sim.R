@@ -1,6 +1,4 @@
-#Last update: January 23, 2024
-
-#Make sure you set the work directly here if needed.
+setwd("M:/Projects/2023/Project.EVSIexval/Analysis")
 
 source("include.R")
 

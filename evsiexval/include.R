@@ -1,12 +1,10 @@
-#Last update: January 23, 2024
-
 library(tidyverse)
 library(voipred)
 library(pROC)
 library(sqldf)
 
 
-set.seed(123)
+set.seed(123) #123 #3344 #123456
 
 my_format <- function(val, n_digits=4)
 {
