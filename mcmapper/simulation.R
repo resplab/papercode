@@ -1,23 +1,23 @@
+# Simulation analysis
+
+# Load required packages
 library(tidyverse)
 library(mcmapper)
 library(pROC)
 library(RSSthemes)
+library(doParallel)
+library(foreach)
+
+# Set a seed for reproducibility
 set.seed(2024)
 
-prevs <- seq(from = 0.01, to = 0.50, by = 0.01)
-c_stats <- seq(from = 0.51, to = 0.99, by = 0.01)
+# Register 7 cores for parallelization
+# If you have less than 7 cores, use a smaller number
+registerDoParallel(cl <- makeCluster(7))
 
-se_mc <- function(n, m, c)
-{
-  se_m <- sqrt(m*(1-m)/n)
-  se_c <- sqrt(c*(1-c)*((1+(n/2-1)*((1-c)/(2-c)))+((n/2-1)*c)/(1+c))/(n^2*m*(1-m)))
-
-  c(se_m=se_m, se_c=se_c)
-}
-
-
-
-# Define the function to solve for n
+# Define the function to solve for the number of samples n
+# required to obtain the desired level of standard error, se_m and se_c,
+# for given prevalence m and c-statistic c, respectively
 solve_for_n <- function(m, c, se_m, se_c) {
   n_m <- m*(1-m)/se_m^2
 
@@ -36,25 +36,35 @@ solve_for_n <- function(m, c, se_m, se_c) {
   n1 <- (-B + sqrt(discriminant)) / (2 * A)
   n2 <- (-B - sqrt(discriminant)) / (2 * A)
 
-  # Return the solutions
+  # Return the the max of n1 and n2
   n_c <-max(n1, n2)
-
   max(c(n_m=n_m, n_c=n_c))
 }
 
+# Define a grid of prevalence and c-statistic for simulation analysis
+# by three two-parameter distributions: beta, logit-norm, and probit-norm
+prevs <- seq(from = 0.01, to = 0.50, by = 0.01)
+c_stats <- seq(from = 0.51, to = 0.99, by = 0.01)
+param_grid <- expand.grid(prev = prevs,
+                          c_stat = c_stats,
+                          type=c("beta","logitnorm",'probitnorm'))
 
-param_grid <- expand.grid(prev = prevs, c_stat = c_stats,type=c("beta","logitnorm",'probitnorm'))
+# Create directories to save results and figures
+dir.create("mcmapper/results")
+dir.create("mcmapper/figures")
 
+# If the solution already exists, do not calculate the again.
+# This is provided.
 if(file.exists("results/algos_sol.rds")){
   calculate_sol <- F
 } else{
   calculate_sol <- T
 }
 
-dir.create("mcmapper/results")
-
+# If you want to re-calculate the solution, set calculate_sol to FALSE
 if(calculate_sol){
 
+  # For each row of the grid, apply mcmap function to obtain the solution
   tmp_sol <- apply(param_grid, 1, function(tmp_row) {
     c(tmp_row,as.numeric(mcmap(as.numeric(tmp_row[1:2]),tmp_row[3])$value))
   }) %>%
@@ -62,29 +72,27 @@ if(calculate_sol){
     as.data.frame() %>%
     mutate(across(c(1:2,4:5),as.numeric))
 
-  # sanity-check: unique values
-  tmp_sol %>%
+  # sanity-check: the solutions should be unique
+  sanity_check <- tmp_sol %>%
     group_by(type) %>%
     distinct(V4,V5) %>%
-    tally() -> sanity_check
+    tally()
 
-  sanity_check
-
+  # Save the solution
   write_rds(tmp_sol,
             "mcmapper/results/algos_sol.rds")
 }
 
+# Load the solution
 df_algo_sol <- read_rds("mcmapper/results/algos_sol.rds") %>%
   rename(arg1=V4,
          arg2=V5)
 
-sim_dir <- "mcmapper/sim_results"
-dir.create(sim_dir)
-
-n_outer <- 1
-
+# Define function to calculate the standard error
 se <- function(x) {sqrt(var(x)/length(x))}
 
+# Define  function to choose the sampling algorithm
+# given the type of distribution
 choose_ralgo <- function(type){
   ifelse(type=="logitnorm", rlogitnorm,
          ifelse(type=="probitnorm", rprobitnorm,
@@ -93,16 +101,20 @@ choose_ralgo <- function(type){
   )
 }
 
+# Define significance level alpha
 alpha_coverage <- 0.90
 alpha <- (1-alpha_coverage)/2
 qcrit <- abs(qnorm(alpha))
 
-# parallelization on mac
-library(doParallel)
-library(foreach)
-registerDoParallel(cl <- makeCluster(7))
+# Define the desired threshold of standard error in both
+# prevalence m and c-statistic c in the simulation analysis
 SE <- 0.001
 
+# Create a folder to store intermediate simulation results
+sim_dir <- "mcmapper/sim_results"
+dir.create(sim_dir)
+
+# Perform simulation by parallelization
 foreach(i=1:nrow(df_algo_sol),.combine = "+") %dopar% {
 
   library(mcmapper)
@@ -151,14 +163,13 @@ foreach(i=1:nrow(df_algo_sol),.combine = "+") %dopar% {
   readr::write_rds(res,paste0(sim_dir,"/",i,".rds"))
   return(0)
 }
-
 stop(cl)
 
-# process results ---------------------------------------------------------
 
+# Process the results
 sim_files <- list.files(sim_dir)
 
-sim_results_detailed <- lapply(sim_files,function(tmp_sim){
+sim_results <- lapply(sim_files,function(tmp_sim){
   read_rds(paste0(sim_dir,"/",tmp_sim))
 }) %>%
   do.call(rbind,.) %>%
@@ -175,14 +186,18 @@ sim_results_detailed <- lapply(sim_files,function(tmp_sim){
                             "Difference in c-statistic"),
          parameter = factor(parameter,levels=c("Difference in prevalence","Difference in c-statistic")))
 
-write_rds(sim_results_detailed,"mcmapper/results/simulation_results.rds")
+# Save the processed simulation results
+write_rds(sim_results,"mcmapper/results/simulation_results.rds")
 
-sim_results_detailed <- read_rds("mcmapper/results/simulation_results.rds")
+# Load the processed simulation results
+sim_results <- read_rds("mcmapper/results/simulation_results.rds")
 
-to_math <- as_labeller(c(`mmm`="m-hat(m)",`ccc` = "c-hat(c)"),label_parsed)
-to_math <- as_labeller(c(`mmm`="1",`ccc` = "2"))
+# Helper functions for relabeling the figure
+# to_math <- as_labeller(c(`mmm`="m-hat(m)",`ccc` = "c-hat(c)"),label_parsed)
+to_math <- as_labeller(c(`mmm`="Difference in m",`ccc` = "Difference in c"))
 
-ggplot(data=sim_results_detailed %>%
+# Generate the figure used in the manuscript
+ggplot(data=sim_results %>%
          mutate(rel_diff = ifelse(parameter=="Difference in prevalence",
                                   difference,
                                   difference),
@@ -190,18 +205,18 @@ ggplot(data=sim_results_detailed %>%
                                    "mmm",
                                    "ccc"),
                 parameter = factor(parameter,
-                                   levels=c("mmm","ccc"),
-                                   labels=c("mmm","ccc"))),
+                                   levels=c("ccc","mmm"),
+                                   labels=c("ccc","mmm"))),
        aes(x=prev,y=c_stat,fill=rel_diff))+
   geom_tile() +
   facet_grid(parameter~type,labeller = labeller(parameter = to_math)) +
   theme_classic() +
-  xlab("m") +
-  ylab("c") +
+  xlab("Expected m") +
+  ylab("Expected c") +
   scale_fill_gradient2(name = "") +
   theme_significance(base_size = 25) +
   theme(legend.key.height = unit(0.5, "cm"),
         legend.key.width =  unit(2, "cm")) -> fig_sim
 
-dir.create("mcmapper/figures")
+# Save the figure
 ggsave("mcmapper/figures/fig_sim.jpeg",plot=fig_sim,device = "jpg")
