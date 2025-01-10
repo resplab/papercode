@@ -35,7 +35,7 @@ loaded via a namespace (and not attached):
 [25] sysfonts_0.8.9    vctrs_0.6.5       glue_1.8.0        fansi_1.0.6       colorspace_2.1-1  tools_4.4.1
 [31] pkgconfig_2.0.3
 
-This folder contains the following data and files that can be used to reproduce the simulation results and figure of the manuscript.
+This folder contains the following data and files that can be used to reproduce the simulation results and figure of the manuscript. Please ensure that your starting path is *papercode* using the papercode.Rproj.
 
 It contains the following:
 
