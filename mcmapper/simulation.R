@@ -55,7 +55,7 @@ dir.create("mcmapper/figures")
 
 # If the solution already exists, do not calculate the again.
 # This is provided.
-if(file.exists("results/algos_sol.rds")){
+if(file.exists("mcmapper/results/algos_sol.rds")){
   calculate_sol <- F
 } else{
   calculate_sol <- T
