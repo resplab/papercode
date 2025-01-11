@@ -4,6 +4,8 @@ Authors: Sadatsafavi, M., Lee, T.Y., Petkau, J.
 Code was written by Lee, T.Y.
 For questions or comments, please contact mohsen.sadatsafavi@ubc.ca.
 
+Identical copies of the code and its output are available from https://github.com/resplab/papercode/tree/main/mcmapper
+
 The code was written/evaluated in R with the following software versions:
 R version 4.4.1 (2024-06-14)
 Platform: aarch64-apple-darwin20
@@ -53,4 +55,6 @@ It contains the following:
 
 simulation.R
   An R script that generates the simulation results, stores them, and processes them to create the figure presented in the manuscript.
-
+  Please make sure the working directory is the same as the location of this file.
+  If you would like to override interim results and the saved figures, simply delete the results and figures folders (or empty their content). Note that complete replication takes a few hours on an average computer.
+  This code uses parallel computing and creates an interim sim_results folder to collecting simulation output.

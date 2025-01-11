@@ -1,4 +1,5 @@
 # Simulation analysis
+# Make sure the working directly is the same as this file's location
 
 # Load required packages
 library(tidyverse)
@@ -50,12 +51,12 @@ param_grid <- expand.grid(prev = prevs,
                           type=c("beta","logitnorm",'probitnorm'))
 
 # Create directories to save results and figures
-dir.create("mcmapper/results")
-dir.create("mcmapper/figures")
+dir.create("./results")
+dir.create("./figures")
 
 # If the solution already exists, do not calculate the again.
 # This is provided.
-if(file.exists("mcmapper/results/algos_sol.rds")){
+if(file.exists("./results/algos_sol.rds")){
   calculate_sol <- F
 } else{
   calculate_sol <- T
@@ -80,11 +81,11 @@ if(calculate_sol){
 
   # Save the solution
   write_rds(tmp_sol,
-            "mcmapper/results/algos_sol.rds")
+            "./results/algos_sol.rds")
 }
 
 # Load the solution
-df_algo_sol <- read_rds("mcmapper/results/algos_sol.rds") %>%
+df_algo_sol <- read_rds("./results/algos_sol.rds") %>%
   rename(arg1=V4,
          arg2=V5)
 
@@ -111,7 +112,7 @@ qcrit <- abs(qnorm(alpha))
 SE <- 0.001
 
 # Create a folder to store intermediate simulation results
-sim_dir <- "mcmapper/sim_results"
+sim_dir <- "./sim_results"
 dir.create(sim_dir)
 
 # Perform simulation by parallelization
@@ -187,10 +188,10 @@ sim_results <- lapply(sim_files,function(tmp_sim){
          parameter = factor(parameter,levels=c("Difference in prevalence","Difference in c-statistic")))
 
 # Save the processed simulation results
-write_rds(sim_results,"mcmapper/results/simulation_results.rds")
+write_rds(sim_results,"./results/simulation_results.rds")
 
 # Load the processed simulation results
-sim_results <- read_rds("mcmapper/results/simulation_results.rds")
+sim_results <- read_rds("./results/simulation_results.rds")
 
 # Helper functions for relabeling the figure
 # to_math <- as_labeller(c(`mmm`="m-hat(m)",`ccc` = "c-hat(c)"),label_parsed)
@@ -219,4 +220,4 @@ ggplot(data=sim_results %>%
         legend.key.width =  unit(2, "cm")) -> fig_sim
 
 # Save the figure
-ggsave("mcmapper/figures/fig_sim.jpeg",plot=fig_sim,device = "jpg")
+ggsave("./figures/fig_sim.jpeg",plot=fig_sim,device = "jpg")
