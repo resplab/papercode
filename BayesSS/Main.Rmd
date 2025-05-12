@@ -1,0 +1,691 @@
+---
+title: "R Notebook"
+author: "Mohsen Sadatsafavi"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r}
+set.seed(123)
+
+library(bayespmtools)
+library(pROC)
+library(pmvalsampsize)
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(sqldf)
+library(meta)
+library(knitr)
+library(tidyr)
+library(reshape2)
+
+res_path <- "M:/Projects/2024/Project.BayesSS/results/wip/"
+
+# objects <- c("settings", "isaric_ex", "evidence", "riley_SS", "evidence", "res_samp", "res_pow", "res_samp_2s", "res_pow_2s")
+# for(obj in objects) assign(obj, readRDS(paste0(res_path,obj,".RDS")))
+
+
+my_format <- function(val, n_digits=4)
+{
+  format(round(val,n_digits),nsmall=n_digits, big.mark=",")
+}
+
+
+logit <- function(x) {log(x/(1-x))}
+expit <- function(x) {exp(x)/(1+exp(x))}
+
+
+
+proper_shapes <- c("assurance.nb"=8,
+                  "eciw.cstat"=15,
+                  "qciw.cstat"=15,
+                  "eciw.cal_oe"=16,
+                  "qciw.cal_oe"=16,
+                  "eciw.cal_slp"=17,
+                  "qciw.cal_slp"=17)
+
+proper_names <- c("assurance.nb"="Optimality assurance",
+                  "eciw.cstat"="c-statistic (expected value)",
+                  "qciw.cstat"="c-statistic (assurance)",
+                  "eciw.cal_oe"="O/E ratio (expected value)",
+                  "qciw.cal_oe"="O/E ratio (assurance)",
+                  "eciw.cal_slp"="Calibration slope (expected value)",
+                  "qciw.cal_slp"="Calibration slope (assurance)")
+
+proper_colors <- c("assurance.nb"="red",
+                  "eciw.cstat"="#1f77b4", 
+                  "qciw.cstat"="orange",
+                  "eciw.cal_oe"="#1f77b4",
+                  "qciw.cal_oe"="orange",
+                  "eciw.cal_slp"="#1f77b4",
+                  "qciw.cal_slp"="orange")
+```
+
+
+
+## Setup
+```{r}
+settings <- list(
+  N=c(50, 100, 200, 500, 1000, 2000),
+  n_sim=10000, 
+  dist_type="logitnorm",
+  target_riley = list(oe=0.22, cstat=0.1, cal_slp=0.3, snb=0.2),
+  targets = list(
+                 # fciw.cstat=0.1, 
+                 # fciw.cal_oe=0.22,
+                 # fciw.cal_slp=0.3,
+    
+                 eciw.cstat=0.1, 
+                 eciw.cal_oe=0.22,
+                 eciw.cal_slp=0.3,
+                 
+                 qciw.cstat=c(0.1, 0.9), 
+                 qciw.cal_oe=c(0.22, 0.9),
+                 qciw.cal_slp=c(0.3, 0.9),
+                 
+                 assurance.nb=0.9,
+                 voi.nb=TRUE),
+    threshold=0.2)
+
+
+saveRDS(settings, paste0(res_path,"settings.RDS"))
+```
+
+
+
+## Data wrangling
+```{r}
+data("isaric")
+
+#From 2021 tables of https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/clinicalcommissioninggroupmidyearpopulationestimates
+#Had to update names manually to match voiss:ISARIC data
+#Todo: bring Scotland and Wales
+region_pop <- as.data.frame(list(Region = c("East of England", "London", "Midlands",
+"North East England and Yorkshire", "North West England", "South East England", "South West England", "Scotland", "Wales"
+), population = c(6645011L, 8804769L, 10837785L, 8444104L, 7109936L, 8994117L, 
+5719169L, 5479900L, 3105000L)))
+
+
+isaric_ex <- sqldf("SELECT isaric.*, population FROM isaric LEFT JOIN region_pop ON isaric.Region=region_pop.Region")
+
+london_pop <- region_pop[which(region_pop$Region=="London"),2]
+others <- which(isaric_ex$Region!="London" & !is.na(isaric_ex$population))
+
+expected_n <- sum(isaric_ex$n[others])/sum(isaric_ex$population[others])*london_pop
+
+saveRDS(isaric_ex, paste0(res_path,"isaric_ex.RDS"))
+```
+
+
+
+
+## Evidence synthesis
+```{r}
+evidence <- list()
+
+n_studies <- nrow(isaric)
+
+prevalence <- isaric$n_events/isaric$n
+prevalence_se <- sqrt(prevalence*(1-prevalence)/isaric$n)
+ma_prevalence <- metamean(rep(1, n_studies), mean=prevalence, sd=prevalence_se)
+
+###prev
+evidence$prev$type <- "beta"
+evidence$prev$mean <- ma_prevalence$TE.random
+evidence$prev$sd   <- ma_prevalence$seTE.predict
+
+###c-statistic
+ma_cstat <- metamean(rep(1, n_studies), 
+                     mean=logit(isaric$cstat), 
+                     sd=(logit(isaric$cstat)-logit(isaric$cstat_l))/1.96)
+evidence$cstat$type <- "logitnorm"
+evidence$cstat$mu <- ma_cstat$TE.random
+evidence$cstat$sigma   <- ma_cstat$seTE.predict
+tmp <- logitnorm::momentsLogitnorm(evidence$cstat$mu, evidence$cstat$sigma)
+evidence$cstat$mean <- unname(tmp[1])
+evidence$cstat$sd <- unname(sqrt(tmp[2]))
+
+###calibration-in-the-large
+ma_cal_mean <- metamean(rep(1, n_studies), mean=isaric$cal_mean, sd=(isaric$cal_mean-isaric$cal_mean_l)/1.96)
+evidence$cal_mean$type="norm"
+evidence$cal_mean$mean <- ma_cal_mean$TE.random
+evidence$cal_mean$sd   <- ma_cal_mean$seTE.predict
+
+###calibration slope
+ma_cal_slp <- metamean(rep(1, n_studies), mean=isaric$cal_slope, sd=(isaric$cal_slope-isaric$cal_slope_l)/1.96)
+evidence$cal_slp$type <- "norm"
+evidence$cal_slp$mean <- ma_cal_slp$TE.random
+evidence$cal_slp$sd   <- ma_cal_slp$seTE.predict
+
+saveRDS(evidence, paste0(res_path,"evidence.RDS"))
+```
+
+
+
+## Riley SS
+```{r}
+tmp <- mcmapper::mcmap(c(m=evidence$prev$mean, c=evidence$cstat$mean), type=settings$dist_type)
+riley_SS <- pmvalsampsize(type="b", 
+                        prevalence=evidence$prev$mean, 
+                        cstatistic=evidence$cstat$mean, 
+                        lpnorm=tmp$value,
+                        oeciwidth=settings$target_riley$oe,
+                        csciwidth=settings$target_riley$cal_slp,
+                        cstatciwidth=settings$target_riley$cstat, 
+                        threshold=settings$threshold,
+                        simobs=100000)
+
+kable(riley_SS$results_table)
+
+saveRDS(riley_SS, paste0(res_path,"riley_SS.RDS"))
+```
+
+
+## One-shot results
+```{r}
+res_samp <- bpm_valsamp(
+              evidence=evidence,
+              targets=settings$targets,
+              n_sim=settings$n_sim,
+              method="sample",
+              threshold=settings$threshold)
+
+kable(res_samp$N)
+
+saveRDS(res_samp, paste0(res_path,"res_samp.RDS"))
+```
+
+
+
+
+## One-shot results
+```{r}
+res_pow <- bpm_valprec(
+              res_samp$N, 
+              evidence=res_samp$sample,
+              targets=settings$targets,
+              n_sim=settings$n_sim,
+              method="sample",
+              threshold=settings$threshold)
+
+saveRDS(res_pow, paste0(res_path,"res_pow.RDS"))
+```
+
+
+### Histograms
+```{r}
+
+sample <- res_pow$sample
+
+i1 <- which.min(res_pow$N); i2 <- which.max(res_pow$N)
+
+ciws_df <- as.data.frame(res_pow$ciws$cal_oe[,c(i1,i2)])
+ciws_long <- melt(ciws_df, measure.vars = c("V1", "V2"))
+ggplot(ciws_long, aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.5) +  # Overlay density plots with transparency
+  labs(title = "O/E ratio",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()+
+  theme(legend.position = "top",
+    text = element_text(size = 14),  # Increase base text size
+    axis.title = element_text(size = 16),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    legend.text = element_text(size = 14),  # Increase legend text size
+    plot.title = element_text(size = 18, face = "bold")  # Increase plot title size
+    )+
+  scale_fill_manual(
+    name = "",  # Optional: Change the legend title
+    values = c("V1" = "#1f77b4", "V2" = "#ff7f0e"),  # Specify colors for each group
+    labels = c(paste0("N=",res_pow$N[c(i1,i2)]))  # Custom legend labels
+  )
+ggsave(paste0(res_path,"hist_cal_oe.png"), bg="white")
+
+
+
+ciws_df <- as.data.frame(res_pow$ciws$cstat[,c(i1,i2)])
+ciws_long <- melt(ciws_df, measure.vars = c("V1", "V2"))
+ggplot(ciws_long, aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.5) +  # Overlay density plots with transparency
+  labs(title = "c-statistic",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()+
+  theme(legend.position = "top",
+    text = element_text(size = 14),  # Increase base text size
+    axis.title = element_text(size = 16),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    legend.text = element_text(size = 14),  # Increase legend text size
+    plot.title = element_text(size = 18, face = "bold")  # Increase plot title size
+    )+
+  scale_fill_manual(
+    name = "",  # Optional: Change the legend title
+    values = c("V1" = "#1f77b4", "V2" = "#ff7f0e"),  # Specify colors for each group
+    labels = c(paste0("N=",res_pow$N[c(i1,i2)]))  # Custom legend labels
+  )
+ggsave(paste0(res_path,"hist_cstat.png"), bg="white")
+
+
+
+ciws_df <- as.data.frame(res_pow$ciws$cal_slp[,c(i1,i2)])
+ciws_long <- melt(ciws_df, measure.vars = c("V1", "V2"))
+ggplot(ciws_long, aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.5) +  # Overlay density plots with transparency
+  labs(title = "Calibration slope",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()+
+  theme(legend.position = "top",
+    text = element_text(size = 14),  # Increase base text size
+    axis.title = element_text(size = 16),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    legend.text = element_text(size = 14),  # Increase legend text size
+    plot.title = element_text(size = 18, face = "bold")  # Increase plot title size
+    )+
+  scale_fill_manual(
+    name = "",  # Optional: Change the legend title
+    values = c("V1" = "#1f77b4", "V2" = "#ff7f0e"),  # Specify colors for each group
+    labels = c(paste0("N=",res_pow$N[c(i1,i2)]))  # Custom legend labels
+  )
+ggsave(paste0(res_path,"hist_cal_slp.png"), bg="white")
+
+
+n_sim <- nrow(sample)
+z <- settings$threshold
+n <- res_pow$N[i1]
+nd <- rbinom(rep(n,n_sim), n, sample$prev)
+ntp <- rbinom(rep(n,n_sim), nd, sample$se)
+nfp <- rbinom(rep(n,n_sim), n-nd, 1-sample$sp)
+nb1s <- ntp/n - nfp/n*z/(1-z)
+nb2s <- nd/n - (1-nd/n)*z/(1-z)
+
+n <- res_pow$N[i2]
+nd <- rbinom(rep(n,n_sim), n, sample$prev)
+ntp <- rbinom(rep(n,n_sim), nd, sample$se)
+nfp <- rbinom(rep(n,n_sim), n-nd, 1-sample$sp)
+nb1l <- ntp/n - nfp/n*z/(1-z)
+nb2l <- nd/n - (1-nd/n)*z/(1-z)
+
+dnbs_df <- data.frame(dnbs=nb1s-pmax(0,nb2s), dnbl=nb1l-pmax(0,nb2l))
+dnbs_long <- melt(dnbs_df, measure.vars = c("dnbs", "dnbl"))
+ggplot(dnbs_long, aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.5) +  # Overlay density plots with transparency
+  labs(title = "dNB",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()+
+  theme(legend.position = "top",
+    text = element_text(size = 14),  # Increase base text size
+    axis.title = element_text(size = 16),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    legend.text = element_text(size = 14),  # Increase legend text size
+    plot.title = element_text(size = 18, face = "bold")  # Increase plot title size
+    )+
+  scale_fill_manual(
+    name = "",  # Optional: Change the legend title
+    values = c("dnbs" = "#1f77b4", "dnbl" = "#ff7f0e"),  # Specify colors for each group
+    labels = c(paste0("N=",res_pow$N[c(i1,i2)]))  # Custom legend labels
+  )
+ggsave(paste0(res_path,"hist_dNB.png"), bg="white")
+
+```
+
+
+### ciw graphs
+```{r}
+# Convert the data to a data frame for easier plotting
+df <- data.frame(
+  N = res_pow$N,
+  cstat = res_pow$eciw$cstat,
+  cal_oe = res_pow$eciw$cal_oe,
+  cal_slp = res_pow$eciw$cal_slp
+)
+df$colors <- proper_colors[rownames(df)]
+df$shapes <- proper_shapes[rownames(df)]
+df$proper_names <- proper_names[rownames(df)]
+df <- df[order(df$N),]
+df$names <- rownames(df)
+df$names <- factor(df$names, levels = unique(df$names))
+
+ggplot(df) +
+  geom_line(linewidth=0.8, aes(x=N, y=cstat), col="darkblue") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cstat)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_oe), col="darkorange") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_oe)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_slp), col="darkred") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_slp)) +
+  scale_shape_manual(
+    name = "names",  
+    values = df$shapes,
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "names",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  ylab("Value")+
+  theme_pander() +
+  theme(legend.position = "none")
+ggsave(paste0(res_path,"eciw.png"), bg="white")
+
+
+
+
+
+df <- data.frame(
+  N = res_pow$N,
+  cstat = res_pow$qciw$cstat,
+  cal_oe = res_pow$qciw$cal_oe,
+  cal_slp = res_pow$qciw$cal_slp
+)
+df$names <- factor(rownames(df))  
+df$colors <- proper_colors[rownames(df)]
+df$shapes <- proper_shapes[rownames(df)]
+df$proper_names <- proper_names[rownames(df)]
+df <- df[order(df$N),]
+df$names <- rownames(df)
+df$names <- factor(df$names, levels = unique(df$names))
+
+ggplot(df) +
+  geom_line(linewidth=0.8, aes(x=N, y=cstat), col="darkblue") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cstat)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_oe), col="darkorange") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_oe)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_slp), col="darkred") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_slp)) +
+  
+  scale_shape_manual(
+    name = "names",  
+    values = df$shapes,
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "names",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  ylab("Value")+
+  theme_pander() +
+  theme(legend.position = "none")
+ggsave(paste0(res_path,"qciw.png"), bg="white")
+
+
+
+#LEGEND
+df <- data.frame(N=res_pow$N)
+df$names<-names(proper_names[rownames(df)])
+df$shapes=unname(proper_shapes[rownames(df)])
+df$colors=unname(proper_colors[rownames(df)])
+df$proper_names <- unname(proper_names[rownames(df)])
+df <- df[order(df$N),]
+df$X=c(1, 1.75, 2.75, 3.6, 4.5, 5.3, 6.5)
+df$names <- factor(df$names, levels=unique(df$names))
+
+
+
+ggplot(df)+
+  geom_point(y=0, aes(x=X, shape=names, color=names, size=10))+
+  geom_text(aes(x=X, label=proper_names, y=0),  hjust=-0.04)+
+  scale_shape_manual(
+    values=df$shapes
+  )+
+  scale_color_manual(
+    values=df$colors
+  )+
+  ylim(-0.5, 0.01)+
+  xlim(1,length(proper_names)+1)+
+  annotate("segment", x = 1, xend = 1.5, y = -0.3, yend = -0.3, color = "darkblue", linewidth = 1)+
+  annotate("text", x=2, y=-0.3, color="darkblue", label="c-statistic")+
+  annotate("segment", x = 3, xend = 3.5, y = -0.3, yend = -0.3, color = "darkorange", linewidth = 1)+
+  annotate("text", x=4, y=-0.3, color="darkorange", label="O/E ratio")+
+  annotate("segment", x = 5, xend = 5.5, y = -0.3, yend = -0.3, color = "darkred", linewidth = 1)+
+  annotate("text", x=6, y=-0.3, color="darkred", label="Calibration slope")+
+  annotate("segment", x = 7, xend = 7.5, y = -0.3, yend = -0.3, color = "black", linewidth = 1)+
+  annotate("text", x=8, y=-0.3, color="black", label="Net benefit")+
+  theme_minimal()+
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(),  # Remove major grid lines
+        panel.grid.minor = element_blank(),
+        axis.title.x = element_blank(),  # Remove X-axis title
+        axis.title.y = element_blank(),  # Remove Y-axis title
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank()
+  )
+  ggsave(paste0(res_path,"ciw_legend.png"), width=22, height=1, bg="white")
+
+
+```
+
+
+
+### Instability plots
+```{r}
+n1 <- res_pow$N['qciw.cal_slp']
+n2 <- res_pow$N['qciw.cal_oe']
+  
+png(filename=paste0(res_path,"cal_error_small.png"))
+#plot_cal_instability(res_pow$N['qciw.cal_oe'], res_pow$sample, method="loess")
+bayescpm:::plot_cal_distance(n2, res_pow$sample, method="loess")
+text(0.5,1,paste0("N=",n2))
+dev.off()
+
+
+png(filename=paste0(res_path,"cal_error_large.png"))
+bayescpm:::plot_cal_distance(n1, res_pow$sample, method="loess")
+text(0.5,1,paste0("N=",n1))
+dev.off()
+```
+
+
+
+
+### EVSI and Assurance
+```{r}
+
+
+
+df <- data.frame(N=res_pow$N, EVPI=res_pow$voi$evpi, EVSI=res_pow$voi$evsi, assurance=res_pow$assurance$assurance)
+o <- order(df$N)
+df <- df[o, ]
+
+df$shapes <- proper_shapes[rownames(df)]
+df$proper_names <- proper_names[rownames(df)]
+df$colors <- proper_colors[rownames(df)]
+df$names <- rownames(df)
+
+df$names <- factor(df$names, levels = unique(df$names))
+
+
+
+#Assurance plot
+plt <- ggplot(df, aes(x=N, y=assurance)) +
+  geom_line(color="black") +  # Make the line red
+  geom_point(aes(shape=names, color=names), size=2) +  
+  labs(x="N", y="Assurance") +  # Add labels and title
+  geom_hline(yintercept = 1, color="gray") +
+  geom_hline(yintercept = res_pow$assurance$assurance0, color="gray") +
+  scale_shape_manual(
+    name = "names",  
+    values = df$shapes,
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "names",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_y_continuous(limits=c(0, 1.09)) +
+  theme_minimal()+theme(legend.position = "none")
+  
+print(plt)
+
+ggsave(paste0(res_path, "nb_assurance.png"), bg="white")
+
+
+
+df$EVSI_EVPI_ratio <- df$EVSI / df$EVPI
+scale_factor <- max(df$EVSI) / max(df$EVSI_EVPI_ratio)
+df$EVSI_EVPI_ratio_scaled <- df$EVSI_EVPI_ratio * scale_factor
+
+
+# EVSI plot
+plt <- ggplot(df, aes(x=N)) +
+  geom_line(aes(y=EVSI), color="black") +  # Add the EVSI/EVPI ratio line
+  geom_point(aes(y=EVSI, shape=names, color=names), size=2) +  
+  labs(x = "Sample size (N)", y = "Expected gain in NB (EVSI)", title = "") +
+  scale_shape_manual(
+    name = "Sample size targets and rules",  
+    values = df$shapes,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "Sample size targets and rules",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  # Primary Y-axis limits
+  scale_y_continuous(
+    limits = c(0, max(df$EVSI, df$EVPI)),
+    sec.axis = sec_axis(~ . / scale_factor, name = "EVSI/EVPI Ratio")  # Secondary Y-axis
+  ) +
+  # Horizontal lines
+  geom_hline(yintercept = df$EVPI, color = "gray") +
+  theme_minimal()
+print(plt)
+
+ggsave(paste0(res_path,"evsi.png"), bg="white")
+```
+
+
+
+
+
+### Appendix
+
+
+## One-shot results (2s)
+```{r}
+res_samp_2s <- bpm_valsamp(
+              evidence=evidence,
+              targets=settings$targets,
+              n_sim=settings$n_sim,
+              method="2s",
+              threshold=settings$threshold)
+
+kable(res_samp_2s$N)
+
+saveRDS(res_samp_2s, paste0(res_path,"res_samp_2s.RDS"))
+```
+
+
+
+
+## One-shot results (2s)
+```{r}
+res_pow_2s <- bpm_valprec(
+              res_samp_2s$N, 
+              evidence=res_samp_2s$sample,
+              targets=settings$targets,
+              n_sim=settings$n_sim,
+              method="2s",
+              threshold=settings$threshold)
+
+saveRDS(res_pow_2s, paste0(res_path,"res_pow_2s.RDS"))
+```
+
+
+
+
+
+### ciw graphs (2s)
+```{r}
+# Convert the data to a data frame for easier plotting
+df <- data.frame(
+  N = res_pow_2s$N,
+  cstat = res_pow_2s$eciw$cstat,
+  cal_oe = res_pow_2s$eciw$cal_oe,
+  cal_slp = res_pow_2s$eciw$cal_slp
+)
+
+df$colors <- proper_colors[rownames(df)]
+df$shapes <- proper_shapes[rownames(df)]
+df$proper_names <- proper_names[rownames(df)]
+df <- df[order(df$N),]
+df$names <- rownames(df)
+df$names <- factor(df$names, levels = unique(df$names))
+
+plt <- ggplot(df) +
+  geom_line(linewidth=0.8, aes(x=N, y=cstat), col="darkblue") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cstat)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_oe), col="darkorange") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_oe)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_slp), col="darkred") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_slp)) +
+  scale_shape_manual(
+    name = "names",  
+    values = df$shapes,
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "names",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  ylab("Value")+
+  theme_pander() +
+  theme(legend.position = "none")
+
+plot(plt)
+ggsave(paste0(res_path,"eciw_2s.png"), bg="white")
+
+
+
+
+
+df <- data.frame(
+  N = res_pow_2s$N,
+  cstat = res_pow_2s$qciw$cstat,
+  cal_oe = res_pow_2s$qciw$cal_oe,
+  cal_slp = res_pow_2s$qciw$cal_slp
+)
+df$names <- factor(rownames(df))  
+df$colors <- proper_colors[rownames(df)]
+df$shapes <- proper_shapes[rownames(df)]
+df$proper_names <- proper_names[rownames(df)]
+df <- df[order(df$N),]
+df$names <- rownames(df)
+df$names <- factor(df$names, levels = unique(df$names))
+
+plt <- ggplot(df) +
+  geom_line(linewidth=0.8, aes(x=N, y=cstat), col="darkblue") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cstat)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_oe), col="darkorange") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_oe)) +
+  geom_line(linewidth=0.8, aes(x=N, y=cal_slp), col="darkred") +  # Colored lines
+  geom_point(size=3, aes(color=names, shape=names, x=N, y=cal_slp)) +
+  scale_shape_manual(
+    name = "names",  
+    values = df$shapes,
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  scale_color_manual(
+    name = "names",  
+    values = df$colors,  # Unique shapes
+    labels = df$proper_names  # Use levels of N for labels
+  ) +
+  ylab("Value")+
+  theme_pander() +
+  theme(legend.position = "none")
+plot(plt)
+
+ggsave(paste0(res_path,"qciw_2s.png"), bg="white")
+
+```
