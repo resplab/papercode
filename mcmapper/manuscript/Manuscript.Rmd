@@ -1,11 +1,16 @@
 ---
 title: "Identification of distributions for risks based on the first moment and c-statistic: with application in decision modeling, sample size calculations, and value-of-information analysis"
 output:
+  pdf_document:
+    keep_tex: yes
+    includes:
+      in_header: preamble.tex
   word_document: default
   html_document:
     df_print: paged
 referee: yes
 bibliography: references.bib
+csl: sage-vancouver.csl
 header: 
 ---
 
@@ -27,12 +32,12 @@ my_format <- function(val, n_digits=4)
 
 ## Abstract
 
-Decision analytic modeling, sample size calculation, and value-of-information analysis for risk prediction models often require specification of the distribution of predicted risks in the target population. However, this is seldom reported in conventional model development and validation studies. On the other hand, indirect information on this distribution is often available in terms of expected value and c-statistic. Methods that can reconstruct the distribution of risks from such information can have broad applicability. Here, we show that for a wide class of probability distributions for risks, knowing the expected value and c-statistic is enough to identify the distribution. The derivation motivates numerical algorithms for mapping a given pair of expected value and c-statistic to the parameters of specified two-parameter distributions for probabilities. In a simulation study, we evaluated the numerical accuracy of such algorithms for common families of distributions for risks (Beta, Logit-normal, and Probit-normal). In a case study we show how this approach can be used to enable Monte Carlo sampling from the posterior distribution of parameters that determine the distribution of predicted risks. The accompanying **mcmapper** R package encapsulates these developments. 
+Decision analytic modeling, sample size calculations, and value-of-information analysis for risk prediction models often require specification of the distribution of predicted risks in the target population. However, this is seldom reported in conventional model development and validation studies. On the other hand, indirect information on this distribution is often available in terms of expected value and c-statistic. Methods that can reconstruct the distribution of risks from such information can have broad applicability. Here, we show that for a wide class of probability distributions for risks, knowing the expected value and c-statistic is enough to identify the distribution. The derivation motivates numerical algorithms for mapping a given pair of expected value and c-statistic to the parameters of specified two-parameter distributions for probabilities. In a simulation study, we evaluated the numerical accuracy of such algorithms for common families of distributions for risks (Beta, Logit-normal, and Probit-normal). In a case study we show how this approach can be used to enable Monte Carlo sampling from the posterior distribution of parameters that determine the distribution of predicted risks. The accompanying **mcmapper** R package encapsulates these developments. 
 
 ## Highlights
-- Most risk modeling studies report on outcome prevalence and discriminatory performance of the model (area under the receiver operating characteristic / c-statistic).
-- Decision analytic modeling, sample size calculation, and value-of-information analysis for risk prediction models often require specification of the distribution of predicted risks.
-- We show that for a wide class of probability distributions for risks, knowing the outcome prevalence and the model's c-statistic is enough to identify the distribution of risks.
+- Most risk modeling studies report on outcome prevalence and discriminatory performance of the model (area under the receiver operating characteristic curve / c-statistic).
+- Decision analytic modeling, sample size calculations, and value-of-information analysis for risk prediction models often require specification of the distribution of predicted risks.
+- We show that for a wide class of probability distributions for risks, knowing the outcome prevalence and the model's c-statistic is enough to identify the distribution.
 - The accompanying open-access software provides numerical algorithms for such mapping for common distributions for risk.
 
 \newpage
@@ -82,12 +87,12 @@ We have implemented a set of numerical algorithms for finding the parameters of 
 
 ```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
 library(tidyverse)
-library(voipred) #Install from https://github.com/resplab/voipred
+library(voipred)
 library(pROC)
 library(WeightedROC)
 library(sqldf)
 library(mcmapper)
-library(bayespmtools) #Install from https://github.com/resplab/bayespmtools
+library(bayespmtools)
 library(fitdistrplus)
 library(ggpubr)
 
@@ -163,14 +168,17 @@ waucs <- rep(NA, 10000)
 for(i in 1:10000)
 {
   w <- rgamma(n,1,1)
-  tp.fp <- WeightedROC(dev_data$pi, dev_data$Y, w)
+  tp.fp <- WeightedROC(dev_data$pi, dev_data$Y, w/sum(w))
   waucs[i] <- WeightedAUC(tp.fp)
 }
 cstat <- WeightedAUC(WeightedROC(dev_data$pi, dev_data$Y))
 cstat_ci <- quantile(waucs, c(0.025,0.975))
 
 # cstat_ci <- ci(Y~pi, data=dev_data, quiet=T)
-cstat_parms <- inv_moments("beta", c(cstat, ((cstat_ci[2]-cstat_ci[1])/1.96)^2))
+#cstat_parms <- inv_moments("beta", c(cstat, ((cstat_ci[2]-cstat_ci[1])/1.96)^2))
+f <- function(x) {tmp=qbeta(c(0.025,0.975),x,x/cstat-x); (tmp[2]-tmp[1])-(cstat_ci[2]-cstat_ci[1])}
+res <- uniroot(f=f,interval=c(1,1000))
+cstat_parms <- c(shape1=res$root, shape2=res$root/cstat-res$root)
 prev_parms  <- c(shape1=sum(dev_data$Y), shape2=length(dev_data$Y)-sum(dev_data$Y))
 
 #beta_parms <- fitdistrplus::fitdist(dev_data$pi, distr="beta", method="mme")$estimate
@@ -186,7 +194,7 @@ To illustrate this, we create a risk prediction model for 30-day mortality after
 
 Out of `r nrow(dev_data)`, `r sum(dev_data$Y)` experienced the outcome ($\hat{\mathbb{E}}(Y)=`r my_format(mean(dev_data[,'Y']),3)`$). The c-statistic of the model in this sample was `r my_format(cstat,3)`, with a 95% credible interval, quantified using the Bayesian bootstrap method[@Gu2008] of `r my_format(cstat_ci[1],3)`-`r my_format(cstat_ci[2],3)`.
 
-If the original development sample was available, one could use sample-based methods, such as Bayesian bootstrapping, to quantify uncertainty around the distribution of predicted risks[@Pasta1999]. Assuming we do not have access to the sample, we use the summary statistics above as the source of information. We parameterize the distribution of prevalence as $m\sim\mbox{Beta}(`r prev_parms[1]`,`r prev_parms[2]`)$, and that of the c-statistic as $c\sim\mbox{Beta}(`r my_format(cstat_parms[1],2)`,`r my_format(cstat_parms[2],2)`)$. The former is based on the standard Beta-Binomial Bayesian modeling, and latter is based on finding the two parameters of the Beta distribution whose mean and 97.5th percentile match, respectively, the point estimate and the upper bound of the credible interval reported above.
+If the original development sample was available, one could use sample-based methods, such as Bayesian bootstrapping, to quantify uncertainty around the distribution of predicted risks[@Pasta1999]. Assuming we do not have access to the sample, we use the summary statistics above as the source of information. We parameterize the distribution of prevalence as $m\sim\mbox{Beta}(`r prev_parms[1]`,`r prev_parms[2]`)$, and that of the c-statistic as $c\sim\mbox{Beta}(`r my_format(cstat_parms[1],1)`,`r my_format(cstat_parms[2],1)`)$. The former is based on standard Beta-Binomial Bayesian modeling, and the latter is based on finding the two parameters of the Beta distribution whose mean and central 95% width match, respectively, the point estimate and 95% credible interval width as reported above.
 
 We use the Beta distribution to characterize predicted risks, which is indexed by two parameters $\alpha$ and $\beta$. Our goal is to quantify our uncertainty around the joint distribution of $\alpha$ and $\beta$. This can be achieved by repeatedly sampling from the assigned distributions to prevalence ($m$) and c-statistic ($c$), applying our mapping algorithm, and recording the resulting $\alpha$ and $\beta$ values. We note that this sampling algorithm implements independent draws from $m$ and $c$, despite the fact that they are estimated from the same data. However, as shown in  Supplementary Material - Section 3, the posterior distributions of $m$ and $c$ are independent if such distributions are constructed via Bayesian bootstrapping in the original sample.
 
@@ -280,7 +288,7 @@ While the mapping algorithms performed well in our brief simulation studies, the
 
 In assigning a distribution type to the distribution of risks (e.g. Beta in our case study), the onus is on the investigator to decide on the appropriateness of the family of distributions. Sometimes there is auxiliary information in a report, such as the histogram of predicted risks, that the investigator can draw on, and perform sensitivity analyses as required.
 
-Overall, this approach provides objectivity to specifying the distribution of predicted risks, with applicability in health technology assessments, sample size calculations, and VoI analyses. Given the ubiquity of reporting prevalence and c-statistic in model development and validation studies, we expect this approach to play an important role in the future implementation and uptake of this approach.
+Overall, given the ubiquity of reporting prevalence and c-statistic in the development and validation studies of risk prediction models, we expect this approach to play an important role in uncertainty quantification when evaluating such models. Health technology assessments, sample size calculations, and VoI analyses are immediate areas of application for this methodology. 
 
 # References
 <div id="refs"></div>

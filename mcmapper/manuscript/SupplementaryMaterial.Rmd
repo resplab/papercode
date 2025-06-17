@@ -1,0 +1,108 @@
+---
+title: "Supplementary Material for: Identification of distributions for risks based on the first moment and c-statistic: with application in decision modeling, sample size calculations, and value-of-information analysis"
+author: ""
+output:
+  pdf_document:
+    keep_tex: yes
+    includes:
+      in_header: preamble.tex
+referee: yes
+bibliography: references.bib
+csl: sage-vancouver.csl
+header: 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R echo=FALSE, include=FALSE}
+options(tinytex.clean = FALSE)
+library(tidyverse)
+res_path <- "./"
+
+my_format <- function(val, n_digits=4)
+{
+  format(round(val,n_digits),nsmall=n_digits, big.mark=",")
+}
+```
+
+
+\clearpage
+
+# Supplementary Material - Section 1: Details of numerical algorithms
+
+Our implementation is generally based on solving the system of equations provided in the main text. The CDF and its square for the class of distributions that satisfy the identification requirement are generally well-behaved: they are smooth, strictly monotonic functions within the unit square. As such, these integrals can, for the most part, be evaluated using general numerical integrators. Solving this system of equations can also be programmed as a two-variable optimization problem, for example via the gradient descent algorithm that finds the value of $\lambda$ that minimizes the quadratic error ($\int_0^1F(x;\lambda)dx-[1-m])^2+(\int_0^1F^2(x;\lambda)dx-[1-2cm+(2c-1)m^2])^2$. The **mcmap_generic()** function in the **mcmapper** package implements this general algorithm for a general CDF that is indexed by two parameters. It relies on base R's **integrate()** function for computing the two integrals, and base R's **optim()** function for the gradient descent component.
+
+This generic mapping algorithm can be improved for specific cases. For example, for the beta and probit-normal distributions, knowing $m$ immediately solves for one of the two distribution parameters. For the beta distribution, the relationship is $m=\alpha/(\alpha+\beta)$. As such, the optimization problem can be reduced to a one-dimensional root-finding: solve for $\alpha$ in $\int_0^1\mathcal{B}^2(x;\alpha,\alpha\frac{1-m}m)dx = 1-2cm+(2c-1)m^2$, where $\mathcal{B}$ is the beta distribution CDF (i.e., incomplete beta function). The **mcmap_beta()** function implements this approach. For the probit-normal distribution, the relationship is $\Phi(\mu/\sqrt(1+\sigma^2))=m$. Again, expressing $\mu$ as a function of $m$ and $\sigma$ reduces the problem to one-dimensional root-finding: solve for $\sigma$ in $\int_0^1\Phi^2(\frac{\Phi^{-1}(x)-\Phi^{-1}(m)\sqrt(1+\sigma^2)}{\sigma})dx = 1-2cm+(2c-1)m^2$ (one can alternatively express $\sigma$ in terms of $m$). The **mcmap_probitnorm()** function implements this algorithm. For the \mbox{logit}-normal distribution, moments are not analytically expressible @Holmes2022LogitnormalMoments, and our base implementation of **mcmap\_\mbox{logit}norm()** uses the gradient descent algorithm fine-tuned for this particular case (e.g., log-transforming $\sigma$ to enable unconstrained optimization). However, this algorithm may fail to converge for extreme values of $m$ or $c$. An alternative implementation, invoked by default when $m \notin [0.01, 0.99]$ or $c \notin [0.55, 0.95]$, breaks the problem into two nested one-dimensional root-finding algorithms. It solves for $\sigma$ in $\int_0^1\Phi^2(\frac{\log(x/(1-x))-\mu(m, \sigma)}{\sigma})dx = 1-2cm+(2c-1)m^2$, where $\mu(m, \sigma)$ returns the $\mu$ parameter of the logitnormal distribution given its mean and $\sigma$. In turn, $\mu()$ solves for $\mu$ in $\int_0^1\Phi(\frac{log(x/(1-x))-\mu}{\sigma})dx=m$. The latter takes advantage of the infinite series for $\mu$ derived by Holmes and Schofield @Holmes2022LogitnormalMoments.
+
+\clearpage
+
+## Supplementary Material - Section 2: Brief simulation studies
+
+We conducted brief simulation studies to determine the numerical accuracy of our algorithms in recovering the two parameters of the beta, logit-normal, and probit-normal distributions. Our approach involved identifying the parameters of the distribution for a given {$m$,$c$} value, empirically estimating the {$m$,$c$} of this distribution via randomly drawing a large number of risks and response values, and comparing these estimates with the original values.
+
+We performed this simulation for each combination of $m=0.01,0.02,\dots,0.49,0.50$ and $c=0.51, 0.52, \dots, 0.98,0.99$. Note that $m$ was capped at 0.5 because for all three distributions, the solutions for {$m$, $c$} and {$1-m$, $c$} are mirror images of each other around $m=0.50$ (for the beta distribution, the two solutions have their $\alpha$ and $\beta$ interchanged, and for the other two, the $\mu$s are negative of each other). As such the solution for $m>0.5$ can be derived from the corresponding solution for $1-m$.
+
+For each {$m$,$c$} value, the size of the simulated data was based on targeting standard error (SE) of 0.001 around both metrics. This value was chosen so that at least the two digits after the decimal points remain significant. For $m$ we used the Wald-type SE formula to determine the required sample size. For $c$, we used the SE formula by Newcombe @Newcombe2006cstatSE. The target sample size was the maximum of the two values. We calculated the differences between {$m$,$c$} and {$\hat m$, $\hat c$}.
+
+Simulation results are shown in Figure \ref{fig:sim-fig}, and illustrate that our algorithm could recover the parameters successfully for typical {$m$,$c$} values, with error not exceeding 0.005.
+
+```{r sim-fig, fig.cap = "Difference between original and recovered (via simulation) values of $m$ (top) and $c$ (bottom) for each of the beta (left), logit-normal (middle), and probit-normal (right) distributions",echo=F,out.width='100%'}
+knitr::include_graphics("fig_sim.jpeg")
+```
+
+\clearpage
+
+# Supplementary Material - Section 3: Indepndence of prevalence and c-statistic under the Bayesian bootstrap sampling scheme
+Let $D_n:=\{(\pi_i,Y_i)\}_{i=1}^n$ be an iid sample of predicted risks and corresponding observed responses. Without loss of generality, we order the original sample such that the $m$ cases are indexed first, followed by the $n-m$ controls. To avoid technicalities, we assume predicted risks have no ties.
+
+We are interested in the properties of the joint posterior distribution of prevalence and c-statistic given this sample under the Bayesian bootstrap scheme.
+
+Definitions:
+
+Prevalence: $p:=Pr(Y=1)$.
+
+c-statistic: $c:=Pr(\pi_i>\pi_j|Y_i=1,Y_j=0)$.
+
+Bayesian bootstrap: assigns a prior improper $\mbox{Dirichlet}(0,0,...,0)$ to the probabilities of all possible distinct values in the population. Rubin showed that one can draw from the posterior distribution of the population (and therefore any parameter defined therein) by assigning a random vector of size $n$ of weights $(W_1,W_2,...,W_n)\sim \mbox{Dirichlet}(1,1,...,1)$ to the observations in the sample (pairs of predicted risks and observed outcomes in our case). 
+
+With a realized set of weights $W$, prevalence and c-statistic can be calculated as follows (upper case as these are RVs):
+
+Prevalence: $P=\sum_{i=1}^mW_i$,
+
+c-stat: $C=\frac{\sum_{i=1}^m\sum_{j=m+1}^nW_iW_jI(\pi_i>\pi_j)}{\sum_{i=1}^m\sum_{j=m+1}^nW_iW_j}$.
+
+
+**Lemma:** 
+
+In the above sampling scheme, $Pr(C|P)=Pr(C)$.
+
+**Proof:**
+
+We use the following properties of the Dirichlet distribution[@Frigyik2010DirichletProperties]:
+
+- Aggregation property: With $(W_1, W_2, ..., W_m) \sim \mbox{Dirichlet}(\alpha_1,\alpha_2,...,\alpha_m)$, if two elements $i$ and $j$ are dropped and replaced by their sum, the resulting vector still has a Dirichlet distribution: $(W_1, W_2,..., W_i+W_j,..., W_m) \sim \mbox{Dirichlet}(\alpha_1,\alpha_2,...,\alpha_i+\alpha_j,...,\alpha_m)$.
+
+- Neutrality property: With $(W_1,W_2,...,W_m) \sim \mbox{Dirichlet}(\alpha_1,\alpha_2,...,\alpha_m)$, if we drop the $m^{th}$ element and re-scale the $m-1$ elements, the resulting vector is independent of $W_m$: $(\frac{W_1}{1-W_m}, \frac{W_2}{1-W_m}, ... \frac{W_{m-1}}{1-W_m}) \perp W_m$.
+
+Back to the proof, we note that sum of the weights within cases and controls is, respectively, $P$ and $1-P$. By dividing the numerator and the denominator of the equation for $C$ by $P(1-P)$, we have
+
+$C=\frac{\sum_{i=1}^m\sum_{j=m+1}^n \frac{W_i}{P}\frac{W_j}{1-P}I(\pi_i>\pi_j)}{\sum_{i=1}^m\sum_{j=m+1}^n\frac{W_i}{P}\frac{W_j}{1-P}}$.
+
+Applying the aggregation property,$(W_1,W_2,...,W_m, W_{m+1}+...+W_{n}) \sim \mbox{Dirichlet}(1,1,...,n-m)$. Next, applying the neutrality property, we have  $(W_1/P,W_2/P,...,W_m/P) \perp P$. A similar line of reasoning leads to  $(W_{m+1}/(1-P),W_{m+2}/(1-P),...,W_n/(1-P)) \perp (1-P)$. Together, these mean no element in the equation for C is dependent on P QED.
+
+*Corollary*: To be more exact, $(W_1/P,W_2/P,...,W_m/P) \sim \mbox{Dirichlet}(1,1,...,1)$ and $(W_{m+1}/(1-P),W_{m+2}/(1-P),...,W_n/(1-P)) \sim \mbox{Dirichlet}(1,1,...,1)$.
+
+\newpage
+
+
+## Data availability: 
+
+The code and data underlying this study are full public and are available from https://github.com/resplab/papercode/tree/main/mcmapper. The main manuscript document is written in R Markdown and its text and results can be reproduced (under ‘manuscript’ folder). The code for the simulation study in the Supplementary Material is also provided in the same repository.
+
+\newpage
+
+# References
+<div id="refs"></div>
+
