@@ -8,7 +8,8 @@ output:
 ---
 
 ```{r}
-set.seed(123)
+seed <- 123
+set.seed(seed)
 
 library(bayespmtools)
 library(pROC)
@@ -21,8 +22,9 @@ library(meta)
 library(knitr)
 library(tidyr)
 library(reshape2)
+library(peakRAM)
 
-res_path <- "M:/Projects/2024/Project.BayesSS/results/wip/"
+res_path <- "M:/Projects/2024/Project.BayesSS/results/wip/"  #Trailing / is required!
 
 # objects <- c("settings", "isaric_ex", "evidence", "riley_SS", "evidence", "res_samp", "res_pow", "res_samp_2s", "res_pow_2s")
 # for(obj in objects) assign(obj, readRDS(paste0(res_path,obj,".RDS")))
@@ -39,7 +41,7 @@ expit <- function(x) {exp(x)/(1+exp(x))}
 
 
 
-proper_shapes <- c("assurance.nb"=8,
+proper_shapes <- c("assurance.nb"=18,
                   "eciw.cstat"=15,
                   "qciw.cstat"=15,
                   "eciw.cal_oe"=16,
@@ -55,19 +57,18 @@ proper_names <- c("assurance.nb"="Optimality assurance",
                   "eciw.cal_slp"="Calibration slope (expected value)",
                   "qciw.cal_slp"="Calibration slope (assurance)")
 
-proper_colors <- c("assurance.nb"="red",
+proper_colors <- c("assurance.nb"="black",
                   "eciw.cstat"="#1f77b4", 
                   "qciw.cstat"="orange",
                   "eciw.cal_oe"="#1f77b4",
                   "qciw.cal_oe"="orange",
                   "eciw.cal_slp"="#1f77b4",
                   "qciw.cal_slp"="orange")
-```
+
+bench_res <- list() #Contains benchmarking results
 
 
 
-## Setup
-```{r}
 settings <- list(
   N=c(50, 100, 200, 500, 1000, 2000),
   n_sim=10000, 
@@ -97,29 +98,6 @@ saveRDS(settings, paste0(res_path,"settings.RDS"))
 
 
 ## Data wrangling
-```{r}
-data("isaric")
-
-#From 2021 tables of https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/clinicalcommissioninggroupmidyearpopulationestimates
-#Had to update names manually to match voiss:ISARIC data
-#Todo: bring Scotland and Wales
-region_pop <- as.data.frame(list(Region = c("East of England", "London", "Midlands",
-"North East England and Yorkshire", "North West England", "South East England", "South West England", "Scotland", "Wales"
-), population = c(6645011L, 8804769L, 10837785L, 8444104L, 7109936L, 8994117L, 
-5719169L, 5479900L, 3105000L)))
-
-
-isaric_ex <- sqldf("SELECT isaric.*, population FROM isaric LEFT JOIN region_pop ON isaric.Region=region_pop.Region")
-
-london_pop <- region_pop[which(region_pop$Region=="London"),2]
-others <- which(isaric_ex$Region!="London" & !is.na(isaric_ex$population))
-
-expected_n <- sum(isaric_ex$n[others])/sum(isaric_ex$population[others])*london_pop
-
-saveRDS(isaric_ex, paste0(res_path,"isaric_ex.RDS"))
-```
-
-
 
 
 ## Evidence synthesis
@@ -165,6 +143,42 @@ saveRDS(evidence, paste0(res_path,"evidence.RDS"))
 
 
 
+
+
+## One-shot results
+```{r}
+
+res_samp <- bpm_valsamp(
+                      evidence=evidence,
+                      targets=settings$targets,
+                      dist_type=settings$dist_type, 
+                      n_sim=settings$n_sim,
+                      method="sample",
+                      threshold=settings$threshold)
+                    
+kable(res_samp$N)
+
+saveRDS(res_samp, paste0(res_path,"res_samp.RDS"))
+```
+
+
+
+## One-shot results
+```{r}
+
+res_pow <- bpm_valprec(
+  res_samp$N, 
+  evidence=res_samp$sample,
+  dist_type=settings$dist_type, 
+  targets=settings$targets,
+  n_sim=settings$n_sim,
+  method="sample",
+  threshold=settings$threshold)
+
+saveRDS(res_pow, paste0(res_path,"res_pow.RDS"))
+```
+
+
 ## Riley SS
 ```{r}
 tmp <- mcmapper::mcmap(c(m=evidence$prev$mean, c=evidence$cstat$mean), type=settings$dist_type)
@@ -182,38 +196,6 @@ kable(riley_SS$results_table)
 
 saveRDS(riley_SS, paste0(res_path,"riley_SS.RDS"))
 ```
-
-
-## One-shot results
-```{r}
-res_samp <- bpm_valsamp(
-              evidence=evidence,
-              targets=settings$targets,
-              n_sim=settings$n_sim,
-              method="sample",
-              threshold=settings$threshold)
-
-kable(res_samp$N)
-
-saveRDS(res_samp, paste0(res_path,"res_samp.RDS"))
-```
-
-
-
-
-## One-shot results
-```{r}
-res_pow <- bpm_valprec(
-              res_samp$N, 
-              evidence=res_samp$sample,
-              targets=settings$targets,
-              n_sim=settings$n_sim,
-              method="sample",
-              threshold=settings$threshold)
-
-saveRDS(res_pow, paste0(res_path,"res_pow.RDS"))
-```
-
 
 ### Histograms
 ```{r}
@@ -473,13 +455,13 @@ n2 <- res_pow$N['qciw.cal_oe']
   
 png(filename=paste0(res_path,"cal_error_small.png"))
 #plot_cal_instability(res_pow$N['qciw.cal_oe'], res_pow$sample, method="loess")
-bayescpm:::plot_cal_distance(n2, res_pow$sample, method="loess")
+bayespmtools:::plot_cal_distance(n2, res_pow$sample, method="loess")
 text(0.5,1,paste0("N=",n2))
 dev.off()
 
 
 png(filename=paste0(res_path,"cal_error_large.png"))
-bayescpm:::plot_cal_distance(n1, res_pow$sample, method="loess")
+bayespmtools:::plot_cal_distance(n1, res_pow$sample, method="loess")
 text(0.5,1,paste0("N=",n1))
 dev.off()
 ```
@@ -489,8 +471,6 @@ dev.off()
 
 ### EVSI and Assurance
 ```{r}
-
-
 
 df <- data.frame(N=res_pow$N, EVPI=res_pow$voi$evpi, EVSI=res_pow$voi$evsi, assurance=res_pow$assurance$assurance)
 o <- order(df$N)
@@ -573,12 +553,14 @@ ggsave(paste0(res_path,"evsi.png"), bg="white")
 
 ## One-shot results (2s)
 ```{r}
+set.seed(seed)
 res_samp_2s <- bpm_valsamp(
-              evidence=evidence,
-              targets=settings$targets,
-              n_sim=settings$n_sim,
-              method="2s",
-              threshold=settings$threshold)
+  evidence=evidence,
+  dist_type=settings$dist_type, 
+  targets=settings$targets,
+  n_sim=settings$n_sim,
+  method="2s",
+  threshold=settings$threshold)
 
 kable(res_samp_2s$N)
 
@@ -591,12 +573,13 @@ saveRDS(res_samp_2s, paste0(res_path,"res_samp_2s.RDS"))
 ## One-shot results (2s)
 ```{r}
 res_pow_2s <- bpm_valprec(
-              res_samp_2s$N, 
-              evidence=res_samp_2s$sample,
-              targets=settings$targets,
-              n_sim=settings$n_sim,
-              method="2s",
-              threshold=settings$threshold)
+  res_samp_2s$N, 
+  evidence=res_samp_2s$sample,
+  dist_type=settings$dist_type,
+  targets=settings$targets,
+  n_sim=settings$n_sim,
+  method="2s",
+  threshold=settings$threshold)
 
 saveRDS(res_pow_2s, paste0(res_path,"res_pow_2s.RDS"))
 ```
@@ -687,5 +670,83 @@ plt <- ggplot(df) +
 plot(plt)
 
 ggsave(paste0(res_path,"qciw_2s.png"), bg="white")
+
+```
+
+
+
+### Performance
+```{r}
+set.seed(seed)
+
+# prevent sleep
+system("powercfg -change -standby-timeout-ac 0")
+
+bench_res <- list()
+
+index <- 1
+for(i in 1:10)
+{
+  cat(i)
+  bench_res[[index]] <- peakRAM({
+    res_samp <- bpm_valsamp(
+      evidence=evidence,
+      targets=settings$targets,
+      dist_type=settings$dist_type, 
+      n_sim=settings$n_sim,
+      method="sample",
+      threshold=settings$threshold)})
+  bench_res[[index]][1,1] <- "valsamp"
+  index <- index+1
+
+  bench_res[[index]] <- peakRAM({
+    bpm_valprec(
+      1000, 
+      evidence=res_samp$sample,
+      dist_type=settings$dist_type, 
+      targets=settings$targets,
+      n_sim=settings$n_sim,
+      method="sample",
+      threshold=settings$threshold)})
+  bench_res[[index]][1,1] <- "valprec"
+  index <- index+1
+
+  bench_res[[index]] <- peakRAM({
+    bpm_valsamp(
+      evidence=evidence,
+      dist_type=settings$dist_type, 
+      targets=settings$targets,
+      n_sim=settings$n_sim,
+      method="2s",
+      threshold=settings$threshold)})
+  bench_res[[index]][1,1] <- "valsamp (two-step)"
+  index <- index+1
+  
+  bench_res[[index]] <- peakRAM({
+    bpm_valprec(
+      1000, 
+      evidence=res_samp$sample,
+      dist_type=settings$dist_type,
+      targets=settings$targets,
+      n_sim=settings$n_sim,
+      method="2s",
+      threshold=settings$threshold)})
+  bench_res[[index]][1,1] <- "valprec (two-step)"
+  index <- index+1
+}
+
+x <- data.frame()
+for(i in 1:length(bench_res))
+{
+  x <- rbind(x, bench_res[[i]])
+}
+
+saveRDS(x, paste0(res_path,"bench_res.RDS"))
+
+# re-enable sleep timeout (optional)
+system("powercfg -change -standby-timeout-ac 30")
+
+# put system to sleep
+system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
 
 ```
