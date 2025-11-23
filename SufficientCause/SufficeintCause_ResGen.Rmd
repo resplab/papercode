@@ -1,0 +1,362 @@
+---
+title: "SufficientCause_ResGen"
+author: "Mohsen Sadatsafavi"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(corrplot)
+source("sufficientcause.R")
+
+set.seed(123)
+
+res_folder <- "M:/Projects/2024/Project.SufficientCause/output/wip/"
+
+saveRDS(settings, paste0(res_folder,"settings.RDS"))
+
+```
+
+
+
+## By prevalence plots (Prog)
+```{r}
+settings$PROGNOSTIC<-1
+plt <- draw_dependence_plot(assumption = "T", title="T")
+ggsave(paste0(res_folder,"by_prevalence_T.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="U", title="U")
+ggsave(paste0(res_folder,"by_prevalence_U.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="V", title="V")
+ggsave(paste0(res_folder,"by_prevalence_V.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TU", title="T+U")
+ggsave(paste0(res_folder,"by_prevalence_TU.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TV", title="T+V")
+ggsave(paste0(res_folder,"by_prevalence_TV.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="UV", title="U+V")
+ggsave(paste0(res_folder,"by_prevalence_UV.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TUV", title="T+U+V")
+ggsave(paste0(res_folder,"by_prevalence_TUV.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+
+#Legend
+# Dummy data to mimic original groups
+dummy_data <- data.frame(
+  x = 1:4,
+  y = 1:4,
+  variable = factor(c("PPV", "NPV", "SE", "SP"))
+)
+
+# Create the ggplot just for the legend
+legend_ggplot <- ggplot(
+  dummy_data,
+  aes(
+    x = x,
+    y = y,
+    color = variable,
+    linetype = variable
+  )
+) +
+  geom_line(size = 2) +
+  scale_color_manual(
+    values = colors,
+    labels = c("PPV", "NPV", "SE", "SP")
+  ) +
+  scale_linetype_manual(
+    values = c("longdash", "twodash", "dotdash", "dashed")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "left",
+    legend.direction = "vertical",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 48),
+    legend.key.height = unit(6, "lines"),
+    legend.key.width = unit(16, "lines"),
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.spacing.y = unit(1, "lines")
+  ) +
+  guides(
+    color = guide_legend(
+      ncol = 1,
+      override.aes = list(
+        size = 3,
+        linetype = c("dotdash", "dashed", "longdash", "twodash")
+      )
+    ),
+    linetype = "none"
+  )
+
+legend_ggplot
+ggsave(paste0(res_folder,"by_prevalence_legend.png"), dpi=300, units="mm", device="png", width=300, height=200)
+```
+
+## prevalence plots (Diag)
+```{r}
+settings$PROGNOSTIC<-0
+draw_dependence_plot(assumption = "T", title="D") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_T.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="U", title="U") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_U.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="V", title="V") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_V.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TU", title="D+U") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_TU.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TV", title="D+V") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_TV.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="UV", title="U+V") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_UV.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+draw_dependence_plot(assumption="TUV", title="D+U+V") + theme(plot.background = element_rect(fill = "lightgray", color = NA), panel.background = element_rect(fill = "white", color = NA))
+ggsave(paste0(res_folder,"by_prevalence_TUV.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+```
+
+
+
+## Simulation (PROG)
+```{r}
+settings$PROGNOSTIC<-1
+
+results <- data.frame(
+  scenario = character(),
+  sesp = double(),
+  ppvnpv = double(),
+  prop_or = double()
+)
+cors <- data.frame(
+  scenario = character(),
+  se = double(),
+  sp = double(),
+  ppv = double(),
+  npv= double()
+)
+  
+scenarios <- c(
+  "T"="T",
+  "U"="U",
+  "V"="V",
+  "T+U"="TU",
+  "T+V"="TV",
+  "U+V"="UV",
+  "T+U+V \n (uncorrelated)"="ind",
+  "T+U+V \n (weakly correlated)"="wdep",
+  "T+U+V \n (moderately correlated)"="mdep",
+  "T+U+V \n (strongly correlated)"="sdep",
+  "T+U+V \n (fully correlated)"="fdep",   
+  "Maximum entropy"="ind_unif"
+)
+
+for (i in 1:length(scenarios)) {
+  x <- simulate_updating_scenarios(settings$n_sim, scenarios[i])
+  results[i, 1] <- names(scenarios)[i]
+  results[i, 2:4] <- x[c('KL.sesp','KL.ppvnpv','KL.prop_or')]
+  cors[i, 1] <- names(scenarios)[i]
+  cors[i, 2:5] <- x[c('cor.se','cor.sp','cor.ppv','cor.npv')]
+}
+
+
+
+df_long <- results %>%
+  pivot_longer(cols = c(sesp, ppvnpv, prop_or),
+               names_to = "method",
+               values_to = "value")
+
+df_long$scenario <- factor(df_long$scenario, levels = names(scenarios))
+df_long$method <- factor(df_long$method, levels = c("ppvnpv","sesp","prop_or"))
+
+# Plot
+ggplot(df_long, aes(x = scenario, y = value, fill = method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(x = "", y = "Kullback–Leibler divergence", fill = "Method") +
+  scale_fill_manual(values=c(sesp="#56B4E9", ppvnpv="#009E73", prop_or="#E69F00"))+
+  theme_minimal() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size=18), axis.title.y = element_text(size = 18))
+
+ggsave(paste0(res_folder,"simulations.P.png"), dpi=300, units="mm", device="png", width=300, height=200)
+
+# Create the ggplot just for the legend
+ggplot() +
+  # Color boxes (centered horizontally)
+  annotate("rect", xmin = 0, xmax = 1, ymin = 2, ymax = 2.8, fill = "#009E73", color = "black") +
+  annotate("rect", xmin = 0, xmax = 1, ymin = 1, ymax = 1.8, fill = "#56B4E9", color = "black") +
+  annotate("rect", xmin = 0, xmax = 1, ymin = 0, ymax = .8, fill = "#E69F00", color = "black") +
+  
+  # Text labels (to the right of boxes)
+  annotate("text", x = 1.2, y = 2.4, label = "By predictive values", hjust = 0, size = 20) +
+  annotate("text", x = 1.2, y = 1.4, label = "By accuracy", hjust = 0, size = 20) +
+  annotate("text", x = 1.2, y = 0.4, label = "Proportional odds", hjust = 0, size = 20) +
+  
+  # Title (centered above boxes)
+  annotate("text", x = 3, y = 4.3, label = "Transportation Method", hjust = 0.5, fontface = "bold", size = 20) +
+  
+  # Coordinate limits and theme
+  coord_cartesian(xlim = c(0, 6), ylim = c(0, 5), clip = "off") +
+  theme_void()
+saveRDS(results, file=paste0(res_folder,"simulations.P.rds"))
+ggsave(paste0(res_folder,"simulations_legend.png"), dpi=300, units="mm", device="png", width=400, height=200)
+```
+
+
+
+
+
+
+
+
+
+## Simulation (DIAG)
+```{r, eval=FALSE}
+settings$PROGNOSTIC<-0
+results <- data.frame(
+  scenario = character(),
+  sesp = double(),
+  ppvnpv = double(),
+  prop_or = double()
+)
+scenarios <- c(
+  "D"="T",
+  "D+U"="TU",
+  "D+V"="TV",
+  "D+U+V \n (uncorrelated)"="ind",
+  "D+U+V \n (weakly correlated)"="wdep",
+  "D+U+V \n (moderately correlated)"="mdep",
+  "D+U+V \n (strongly correlated)"="sdep",
+  "D+U+V \n (fully correlated)"="fdep",
+  "D+U+V \n (maximum entropy)"="max_entropy"
+)
+
+for (i in 1:length(scenarios)) {
+  x <- simulate_updating_scenarios(settings$n_sim, scenarios[i])
+  results[i, 1] <- names(scenarios)[i]
+  results[i, 2:4] <- x[1:3]
+}
+
+df_long <- results %>%
+  pivot_longer(cols = c(sesp, ppvnpv, prop_or),
+               names_to = "method",
+               values_to = "value")
+
+# results$scenario[which(results$scenario=="T")]="D"
+# results$scenario[which(results$scenario=="TU")]="DU"
+# results$scenario[which(results$scenario=="TV")]="DV"
+# results$scenario[which(results$scenario=="TUV")]="DUV"
+
+df_long <- results %>%
+  pivot_longer(cols = c(sesp, ppvnpv, prop_or),
+               names_to = "method",
+               values_to = "value")
+
+df_long$scenario <- factor(df_long$scenario, levels = names(scenarios))
+df_long$method <- factor(df_long$method, levels = c("ppvnpv","sesp","prop_or"))
+
+# Plot
+ggplot(df_long, aes(x = scenario, y = value, fill = method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(x = "", y = "Kullback–Leibler divergence", fill = "Method") +
+  scale_fill_manual(values=c("ppvnpv" = "#009E73", "sesp" = "#56B4E9", "prop_or" = "#E69F00"))+
+  theme_minimal() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size=18))
+
+ggsave(paste0(res_folder,"simulations.D.png"), dpi=300, units="mm", device="png", width=300, height=200)
+```
+
+
+
+#Numerical results
+```{r, eval=FALSE}
+results <- list()
+
+results$base_m <- calc_m(settings$p_src)
+results$base_metrics <- calc_metrics(results$base_m)
+
+#What if prevalence higher by 50?
+p2_sesp <- update_p(
+  settings$p_src,
+  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
+  assumption = "sesp"
+)
+results$update_sesp$p <- p2_sesp
+results$update_sesp$metrics <- calc_metrics(calc_m(p2_sesp))
+
+p2_ppvnpv <- update_p(
+  settings$p_src,
+  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
+  assumption = "ppvnpv"
+)
+results$update_ppvnpv$p <- p2_ppvnpv
+results$update_ppvnpv$metrics <- calc_metrics(calc_m(p2_ppvnpv))
+
+p2_prop_or <- update_p(
+  settings$p_src,
+  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
+  assumption = "prop_or"
+)
+results$update_prop_or$p <- p2_prop_or
+results$update_prop_or$metrics <- calc_metrics(calc_m(p2_prop_or))
+results$update_prop_or$or <- p2_prop_or[1]/(1-p2_prop_or[1])/(settings$p_src[1]/(1-settings$p_src[1]))
+
+saveRDS(results, paste0(res_folder,"results.RDS"))
+```
+
+
+
+
+
+```{r}
+results2 <- list()
+
+results2$ps$src <- settings$p_src
+results2$metrics$src <- calc_metrics(calc_m(results2$ps$src))
+
+results2$ps$des <- settings$p_des
+results2$metrics$des <- calc_metrics(calc_m(results2$ps$des))
+
+target_prev <-  results2$metrics$des['prev']
+results2$prev_ratio <- target_prev /results2$metrics$src['prev']
+
+p2_sesp <- update_p(
+  results2$ps$src,
+  target_prev = target_prev,
+  assumption = "sesp"
+)
+results2$ps$sesp <- p2_sesp
+results2$metrics$sesp <- calc_metrics(calc_m(p2_sesp))
+
+pt <- settings$p_des[1]
+ct2 <- c(pt*results2$metrics$src['ppv'], pt*(1-results2$metrics$src['ppv']), (1-pt)*(1-results2$metrics$src['npv']), (1-pt)*results2$metrics$src['npv'])
+p2_ppvnpv <- p_from_ct(ct2)
+results2$ps$ppvnpv <- p2_ppvnpv
+results2$metrics$ppvnpv <- calc_metrics(calc_m(p2_ppvnpv))
+
+p2_por <- update_p(
+  results2$ps$src,
+  target_prev = target_prev,
+  assumption = "prop_or"
+)
+results2$ps$por <- p2_por
+results2$metrics$por <- calc_metrics(calc_m(p2_por))
+results2$prop_or <- p2_por[1]/(1-p2_por[1])/(settings$p_src[1]/(1-settings$p_src[1]))
+
+results2$metrics <-  t(as.data.frame(results2$metrics))
+results2$ps <-  t(as.data.frame(results2$ps))
+colnames(results2$ps) <- c("T","U","V")
+
+saveRDS(results2, paste0(res_folder,"results2.RDS"))
+```
