@@ -8,9 +8,6 @@ This code is sufficient reproduce the main results of the manuscript.
 ## Data Privacy
 - The input dataset is private and not included in the repository
 
-## Usage
-
-You can either download a zip file containing the directory, or you can clone it by using https://github.com/resplab/papercode/accept3-UK.git 
 
 
 
