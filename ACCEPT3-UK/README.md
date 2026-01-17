@@ -2,7 +2,7 @@
 
 ## Overview
 R code repository for the manuscript 'Performance of multivariable risk prediction algorithms in predicting future COPD exacerbations: a population-based study'.
-This code is sufficient reproduce the main results of the manuscript.
+This cprd.rmd code is sufficient reproduce the main results of the manuscript.
 
 
 ## Data Privacy
