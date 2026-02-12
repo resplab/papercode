@@ -1,0 +1,1058 @@
+---
+title: "R Notebook"
+author: "Mohsen Sadatsafavi"
+date: February 11, 2026 
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(ggpattern)
+library(dplyr)
+library(cumulcalib)
+library(predtools)
+library(VGAM)  #Extended logit
+library(doParallel)
+library(foreach)
+library(latex2exp)
+
+source("core.r")
+
+seed <- 123
+set.seed(seed)
+
+res_path <- "M:/Projects/2025/Project.cumulcalibBenefit/results/wip/"  #Trailing / is required!
+
+load_module <- function(obj)
+{
+  assign(obj, envir=.GlobalEnv, readRDS(paste0(res_path,obj,".RDS")))
+}
+
+collector <- list()
+
+my_format <- function(val, n_digits=4)
+{
+  format(round(val,n_digits),nsmall=n_digits, big.mark=",")
+}
+
+
+proper_colors <- c( "1pm1"="#1f77b4", 
+                  "2pm1"="orange",
+                  "1pm2"="darkgreen",
+                  "2pm2"="maroon"#,"2pm0"="black"
+                  )
+
+
+settings <- list(
+  def_parms=c(b0=0, bx=0.25, ba=-0.5, bxa=0.25),
+  #N=c(100, 250, 1000, 5000),
+  h0_sim_parms= list(n_sim=2000, N=c(500, 5000), b0=c(-1,1), bx=c(0,0.25), ba=c(-0.5,-0.25), bxa=c(0,0.25)),
+  h0b_sim_parms=list(n_sim=2000, N = c(500, 5000), b0 = c(-1/2, 0, 1/2), b1 = c(2/3, 1, 3/2)),
+  h1a_sim_parms=list(n_sim=2000, N=c(500,2500,10000), 
+                    scenarios=list(
+                     s1=c(a=-0.25,b=0.75),
+                     s2=c(a=0,b=0.75),
+                     s3=c(a=0.25,b=0.75),
+                     
+                     s4=c(a=-0.25,b=1),
+                     s5=c(a=0,b=1),
+                     s6=c(a=0.25,b=1),
+                     
+                     s7=c(a=-0.25,b=1.5),
+                     s8=c(a=0,b=1.5),
+                     s9=c(a=0.25,b=1.5))),
+  h1b_sim_parms=list(n_sim=2000, N=c(500,2500,10000), 
+                    scenarios=list(
+                     s1=c(a0=0,    b0=1,   a1=-0.25, b1=1),
+                     s2=c(a0=-0.25,b0=1,   a1=0,     b1=1),
+                     s3=c(a0=0.25, b0=1,   a1=0,     b1=1),
+                     s4=c(a0=0,    b0=1,   a1=0.25,  b1=1),
+                     
+                     s5=c(a0=0,    b0=0.5, a1=0.25,  b1=1),
+                     s6=c(a0=0,    b0=0.5, a1=0,     b1=1),
+                     s7=c(a0=0,    b0=1,   a1=0,     b1=0.5),
+                     s8=c(a0=0,    b0=1.5, a1=0,     b1=1),
+                     
+                     s9=c( a0=0,   b0=1,   a1=0,     b1=1.5),
+                     s10=c(a0=0,   b0=0.5, a1=0,     b1=0.5),
+                     s11=c(a0=0,   b0=1.5, a1=0,     b1=1.5),
+                     s12=c(a0=0,   b0=0,   a1=-0.5,  b1=0)
+                    )
+                  )
+
+  )
+
+saveRDS(settings, paste0(res_path,"settings.RDS"))
+```
+
+
+
+
+#### Stylized RW graphs
+```{r}
+set.seed(seed)
+n <- 1000
+
+df <- gen_data(n, c(b0=-1, bx=1, 0, 0), r = 0) #For random walk example
+df <- df[order(df$p0),]
+
+pi <- df$p0
+res <- cumulcalib(df$Y, pi); 
+png(paste0(res_path,"example_rw_1.png"), width = 2000, height = 1500, res = 300)
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); abline(0,0, col="grey")
+dev.off()
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); 
+# loess_fit <- loess(df$Y ~ pi); plot(pi,predict(loess_fit), type='l'); lines(c(0,1),c(0,1),col="gray")
+# plot(pi, df$p0, type='l');lines(c(0,1),c(0,1),col="gray")
+
+pi <- expit(-1.2+1*df$x)
+res <- cumulcalib(df$Y, pi); 
+png(paste0(res_path,"example_rw_2.png"), width = 2000, height = 1500, res = 300)
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); abline(0,0, col="grey")
+dev.off()
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); 
+
+
+pi <- expit(-1.2+1.5*df$x)
+res <- cumulcalib(df$Y, pi); 
+png(paste0(res_path,"example_rw_3.png"), width = 2000, height = 1500, res = 300)
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); abline(0,0, col="grey")
+dev.off()
+plot(res$data[,c('t','S')], type='l', xlab="Time", ylab="Location", ylim=c(-1,3), col="blue"); 
+
+
+```
+
+
+
+
+
+
+
+
+
+### Stylized comparison of the two methods
+```{r}
+set.seed(seed)
+
+p0 <- integrate(function(x) {dnorm(x)*expit(settings$def_parms['b0']+settings$def_parms['bx']*x)}, -3, 3)$value
+p1 <- integrate(function(x) {dnorm(x)*expit(settings$def_parms['b0']+settings$def_parms['bx']*x+settings$def_parms['ba']+settings$def_parms['bxa']*x)}, -3, 3)$value
+
+collector$def_res$p0 <- p0
+collector$def_res$p1 <- p1
+
+r <- 0.5
+df <- gen_data(2000, parms=settings$def_parms, r=r)
+res1 <- cumulcalibB(df$Y, df$h, df$a, df$p0, aux = T)
+res2 <- cumulcalibB(df$Y, df$h, df$a, aux=T)
+
+df1 <- data.frame(
+  index = 1:length(res1$aux$mu),
+  cumulative_mu = cumsum(res1$aux$mu),
+  s2=res1$aux$s2,
+  Source = "res1"
+)
+
+df2 <- data.frame(
+  index = 1:length(res2$aux$mu),
+  cumulative_mu = cumsum(res2$aux$mu),
+  s2=res2$aux$s2,
+  Source = "res2"
+)
+
+
+# Combine the data frames
+plot_data <- rbind(df1, df2)
+
+# Create the ggplot
+plt1 <- ggplot(plot_data, aes(x = index, y = cumulative_mu, color = Source)) +
+  geom_line(linewidth = 0.2) + # Use 'size' for line thickness, similar to 'lwd'
+  labs(
+    x = "index",
+    y = "Cumulative expected value"
+  ) +
+  scale_color_manual(
+    values = c("res1" = "black", "res2" = "blue"), # Assign colors to internal 'Source' values
+    labels = c("res1" = "Conditional", "res2" = "Marginal"), # Assign custom labels to the legend
+    name = "Approach" # Optional: Change the legend title
+  ) +
+  theme_minimal()+
+  theme(
+    legend.position = c(0.05, 0.95), # Position the legend inside the plot area (x, y coordinates)
+    legend.justification = c("left", "top") # Justify the legend box from its left and top
+  )
+
+
+
+plt2 <- ggplot(plot_data, aes(x = index, y = s2, color = Source)) +
+  geom_line(linewidth = 0.2) + # Use 'size' for line thickness, similar to 'lwd'
+  labs(
+    x = "index",
+    y = "Cumulative variance"
+  ) +
+  scale_color_manual(
+    values = c("res1" = "black", "res2" = "blue"), # Assign colors to internal 'Source' values
+    labels = c("res1" = "Conditional", "res2" = "Marginal"), # Assign custom labels to the legend
+    name = "Estimator" # Optional: Change the legend title
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+df3 <- as.data.frame(res1$data)
+df3$src="Conditional"
+tmp<- as.data.frame(res2$data)
+tmp$src="Marginal"
+df3 <- rbind(df3,tmp)
+plt3 <- ggplot(df3, aes(x=t, y=S, color=src)) +
+  geom_line(linewidth = 0.25) +
+  labs(
+    x = "Time",
+    y = "Location"
+    ) +
+  scale_color_manual(
+    values = c("Conditional"="black", "Marginal"="blue"), # Assign colors to internal 'Source' values
+    labels = c("Conditional"="Conditional", "Marginal"="Marginal"), # Assign custom labels to the legend
+    name = "Estimator" # Optional: Change the legend title
+  )+
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+ggarrange(ggarrange(plt1, plt2), plt3, nrow=2)
+ggsave(paste0(res_path,"mu_var_by_type.png"), width=6, bg="white")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+### H0 simulations
+```{r}
+set.seed(seed)
+
+sp <- settings$h0_sim_parms
+n_sim <- settings$h0_sim_parms$n_sim
+
+# Create parameter grid
+param_grid <- expand.grid(
+  isim = 1:n_sim,
+  N = sp$N,
+  b0 = sp$b0,
+  bx = sp$bx,
+  ba = sp$ba,
+  bxa = sp$bxa,
+  stringsAsFactors = FALSE
+)
+
+# Register cores
+n_cores <- parallel::detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Parallel simulation
+out_list <- foreach(row = 1:nrow(param_grid), .combine = rbind, .packages = c("cumulcalib")) %dopar% {
+  p <- param_grid[row, ]
+  df <- gen_data(p$N, c(p$b0, p$bx, p$ba, p$bxa))
+  
+  results <- data.frame(
+    i = rep(p$isim, 4),
+    N = rep(p$N, 4),
+    b0 = rep(p$b0, 4),
+    bx = rep(p$bx, 4),
+    ba = rep(p$ba, 4),
+    bxa = rep(p$bxa, 4),
+    type = c("1pm1", "2pm1", "1pm2", "2pm2"),
+    NY = NA_real_,
+    pval = NA_real_
+  )
+  
+  results$NY <- sum(df$Y)
+  
+  results$pval[1] <- cumulcalibB(df$Y, df$h, df$a, df$p0, method = "BM")$pval
+  results$pval[2] <- cumulcalibB(df$Y, df$h, df$a, df$p0, method = "BB")$pval
+  results$pval[3] <- cumulcalibB(df$Y, df$h, df$a, method = "BM")$pval
+  results$pval[4] <- cumulcalibB(df$Y, df$h, df$a, method = "BB")$pval
+  
+  results
+}
+
+stopCluster(cl)
+
+h0_sim_data <- as.data.frame(out_list)
+rm(out_list)
+saveRDS(h0_sim_data, paste0(res_path,"h0_sim_data.RDS"))
+```
+
+
+
+#### H0 graph generator
+```{r}
+if(!exists("settings")) {load_module("settings")}
+if(!exists("h0_sim_data")) {load_module("h0_sim_data")}
+
+sp <- settings$h0_sim_parms
+plts <- list()
+
+index <- 1
+for(i in 1:length(sp$N))
+{
+  N_ <- sp$N[i]
+  for(j in 1:length(sp$b0))
+  {
+    b0_ <- sp$b0[j]
+    for(k in 1:length(sp$bx))
+    {
+      bx_ <- sp$bx[k]
+      for(l in 1:length(sp$ba))
+      {
+        ba_ <- sp$ba[l]
+        for(m in 1:length(sp$bxa))
+        {
+          bxa_ <- sp$bxa[m]
+        
+          x <- (0:100)/100
+          this_df  <- h0_sim_data %>% filter(N==N_, b0==b0_, bx==bx_, ba==ba_, type=="1pm1")
+          plt_data <- data.frame(x=x, Test="1pm1", "pval"=ecdf(this_df$pval)(x))
+          this_df  <- h0_sim_data %>% filter(N==N_, b0==b0_, bx==bx_, ba==ba_, type=="2pm1")
+          plt_data <- rbind(plt_data, data.frame(x=x, Test="2pm1", "pval"=ecdf(this_df$pval)(x)))
+          this_df  <- h0_sim_data %>% filter(N==N_, b0==b0_, bx==bx_, ba==ba_, type=="1pm2")
+          plt_data <- rbind(plt_data, data.frame(x=x, Test="1pm2", "pval"=ecdf(this_df$pval)(x)))
+          this_df  <- h0_sim_data %>% filter(N==N_, b0==b0_, bx==bx_, ba==ba_, type=="2pm2")
+          plt_data <- rbind(plt_data, data.frame(x=x, Test="2pm2", "pval"=ecdf(this_df$pval)(x)))
+          
+          plt <- ggplot(plt_data, aes(x=x, y=pval, group=Test,  color=Test)) +
+          geom_line(linewidth=0.125) + # Use 'size' for line thickness, similar to 'lwd'
+          labs(x = "", y = "")+
+          geom_abline(linewidth=0.1, colour = "gray")+
+          annotate(geom="text", x=0, y=0.9, label=sprintf("{%d,%.2f,%.2f,%.2f,%.2f}",N_,b0_,bx_,ba_,bxa_), size=1, color="black", hjust=0)+
+          annotate(geom="text", x=0.65, y=0.4, label="P(p<0.05)", size=1, color="black", hjust=0)+
+          annotate(geom="text", x=c(0.8), y=c(0.3,0.2,0.1,0.0), label=my_format(plt_data[which(plt_data$x==0.05),'pval'],3), size=1, color=proper_colors, hjust=0)+
+          scale_color_manual(
+            name="Test: ",
+            values = proper_colors, 
+            labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+          ) +
+          theme_minimal() + theme(plot.margin=margin(0, 0, 0, 0), 
+                                  axis.text=element_text(size=3), 
+                                  legend.title = element_text(size = 4), 
+                                  legend.text = element_text(size = 4),
+                                  legend.position="none")
+          
+          plts[[index]] <- plt
+          index <- index+1
+        }
+      }
+    }
+  }
+}
+
+ggarrange(plotlist=plts, labels = "", 
+          nrow = 8,
+          ncol = 4,
+          common.legend = TRUE,
+          legend = "top")
+ggsave(paste0(res_path,"h0_sim_ecdfs.pdf"), width=4, height=8, bg="white", device = cairo_pdf)
+
+```
+
+
+
+
+
+## H0b: Additional simulations testing approach 1
+```{r, eval=TRUE}
+set.seed(seed)
+
+sp <- settings$h0b_sim_parms
+n_sim <- sp$n_sim
+
+# Create parameter grid
+param_grid <- expand.grid(
+  isim = 1:n_sim,
+  N = sp$N,
+  b0 = sp$b0,
+  b1 = sp$b1,
+  stringsAsFactors = FALSE
+)
+
+# Register cores
+n_cores <- parallel::detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Parallel simulation
+out_list <- foreach(
+  row = 1:nrow(param_grid),
+  .combine = rbind,
+  .packages = c("cumulcalib")
+) %dopar%
+  {
+    p <- param_grid[row, ]
+
+    df <- gen_data(p$N, settings$def_parms)
+    df$q0 <- expit(p$b0 + p$b1 * logit(df$p0))
+
+    results <- data.frame(
+      i = rep(p$isim, 2),
+      N = rep(p$N, 2),
+      b0 = rep(p$b0, 2),
+      b1 = rep(p$b1, 2),
+      type = c("1pm1", "2pm1"),
+      pval = NA_real_
+    )
+
+    tmp <- cumulcalibB(df$Y, df$h, df$a, df$q0, method = c("BM", "BB"))
+    results$pval[1] <- tmp$by_method$BM$pval
+    results$pval[2] <- tmp$by_method$BB$pval
+
+    results
+  }
+
+stopCluster(cl)
+
+h0b_sim_data <- as.data.frame(out_list)
+rm(out_list)
+saveRDS(h0b_sim_data, paste0(res_path,"h0b_sim_data.RDS"))
+```
+
+
+
+## H0b figure
+```{r, eval=TRUE}
+
+if(!exists("settings")) {load_module("settings")}
+if(!exists("h0b_sim_data")) {load_module("h0b_sim_data")}
+
+sp <- settings$h0b_sim_parms
+plts <- list()
+
+index <- 1
+for (i in 1:length(sp$N)) {
+  N_ <- sp$N[i]
+  for (j in 1:length(sp$b0)) {
+    b0_ <- sp$b0[j]
+    for (k in 1:length(sp$b1)) {
+      b1_ <- sp$b1[j]
+      x <- (0:100) / 100
+      this_df <- h0b_sim_data %>%
+        filter(N == N_, b0 == b0_, b1 == b1_, type == "1pm1")
+      plt_data <- data.frame(
+        x = x,
+        Test = "1pm1",
+        "pval" = ecdf(this_df$pval)(x)
+      )
+      this_df <- h0b_sim_data %>%
+        filter(N == N_, b0 == b0_, b1 == b1_, type == "2pm1")
+      plt_data <- rbind(
+        plt_data,
+        data.frame(x = x, Test = "2pm1", "pval" = ecdf(this_df$pval)(x))
+      )
+
+      plt <- ggplot(
+        plt_data,
+        aes(x = x, y = pval, group = Test, color = Test)
+      ) +
+        geom_line(linewidth = 0.125) + # Use 'size' for line thickness, similar to 'lwd'
+        labs(x = "", y = "") +
+        geom_abline(linewidth = 0.1, colour = "gray") +
+        annotate(
+          geom = "text",
+          x = 0,
+          y = 0.9,
+          label = sprintf("{%d,%s,%s}", N_,MASS::fractions(b0_), MASS::fractions(b1_)),
+          size = 2,
+          color = "black",
+          hjust = 0
+        ) +
+        theme_minimal() +
+        theme(
+          plot.margin = margin(0, 0, 0, 0),
+          axis.text = element_text(size = 3),
+          legend.title = element_text(size = 4),
+          legend.text = element_text(size = 4),
+          legend.position = "none"
+        )
+
+      plts[[index]] <- plt
+      index <- index + 1
+    }
+  }
+}
+
+ggarrange(
+  plotlist = plts,
+  labels = "",
+  nrow = 6,
+  ncol = 3,
+  common.legend = TRUE,
+  legend = "top"
+)
+
+ggsave(paste0(res_path,"h0b_sim_ecdfs.pdf"), width=4, height=8, bg="white", device = cairo_pdf)
+
+```
+
+
+
+## H1a
+
+#### Calibration curves for H1a
+```{r, eval=TRUE}
+sp <- settings$h1a_sim_parms
+plts_h <- list()
+mc <- ici <- c()
+
+x <- qnorm((1:100)/101)
+
+index <- 1
+ici <- c()
+
+lp0 <- settings$def_parms["b0"] + settings$def_parms["bx"] * x 
+lp1 <- settings$def_parms["b0"] + settings$def_parms["bx"] * x + settings$def_parms["ba"] + settings$def_parms["bxa"] * x
+pi0 <- plogis(lp0)
+pi1 <- plogis(lp1)
+
+for(i in 1:length(sp$scenarios))
+{
+  parms <- sp$scenarios[[i]]
+  
+  lp2 <- settings$def_parms["b0"] + settings$def_parms["bx"]*x + parms[1] + parms[2]*(settings$def_parms["ba"] + settings$def_parms["bxa"]*x)
+  p0 <- plogis(lp0)
+  p1 <- plogis(lp2)
+
+  h <- pi0-pi1
+  H <- p0-p1
+  
+  df <- data.frame(pred=h, actual=H)
+  mc <- c(mc, mean(H-h))
+  ici <- c(ici, mean(abs(H-h)))
+  
+  df_binned <- df %>%
+    mutate(bin = cut(pred, quantile(pred,(0:20)/20))) %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(pred, na.rm = TRUE),
+      mean_actual = mean(actual, na.rm = TRUE),
+      count = n(),
+      .groups = "drop"
+    )
+  
+  scenario_ <- names(sp$scenarios)[i]
+  
+  L <- -0.15 #min(df_binned$mean_pred, df_binned$mean_actual)
+  H <- +0.25 #max(df_binned$mean_pred, df_binned$mean_actual)
+  
+  plt_h <- ggplot(data=df_binned, aes(x=mean_pred, y=mean_actual)) +
+    geom_abline(col="gray")+
+    geom_line()+
+    #ggtitle(scenario_)+
+    labs(x = "", y = "")+
+    xlim(L,H)+ylim(L,H)+
+    annotate(geom="text", x=L, y=H, label=paste0("s",i,":{",paste(parms[1:2], collapse=","),"}"), parse=FALSE, hjust=0, size=2)+
+    annotate(geom="text", x=H, y=L+(H-L)/10, label=paste0("E(delta*\"*\" - delta)==",sprintf("%.3f",mc[i])), parse=TRUE, hjust=1, size=2)+
+    annotate(geom="text", x=H, y=L, label=paste0("E(abs(delta*\"*\" - delta))==",sprintf("%.3f",ici[i])), parse=TRUE, hjust=1, size=2)+
+    theme_minimal() + theme(plot.margin=unit(c(0,0,0,0),'lines'), axis.text=element_text(size=6), legend.position="none")
+  plts_h[[index]] <- plt_h
+  
+  index <- index+1
+}
+
+ggarrange(plotlist=plts_h, widths = 3, heights = 3)
+ggsave(paste0(res_path,"h1a_calibs_h.pdf"), width=6, height=4, bg="white", device = cairo_pdf())
+
+```
+
+
+
+
+### H1a simulations
+```{r, eval=TRUE}
+
+set.seed(seed)
+sp <- settings$h1a_sim_parms
+n_sim <- sp$n_sim
+n_run <- n_sim * length(sp$N) * length(sp$scenarios) * 4
+
+n_cores <- parallel::detectCores()-2
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Create all parameter combinations
+param_grid <- expand.grid(
+  isim = 1:n_sim,
+  i = 1:length(sp$N),
+  j = 1:length(sp$scenarios),
+  stringsAsFactors = FALSE
+)
+
+# Parallel loop
+res_list <- foreach(idx = 1:nrow(param_grid), .packages = c("cumulcalib")) %dopar% {
+  row <- param_grid[idx, ]
+  isim <- row$isim
+  i <- row$i
+  j <- row$j
+  
+  N <-  sp$N[i]
+  nm <- paste0("s",j)
+  
+  parms <- sp$scenarios[[j]]
+  
+  x <- rnorm(N)
+  
+  lp0 <- settings$def_parms["b0"] + settings$def_parms["bx"] * x 
+  lp1 <- settings$def_parms["b0"] + settings$def_parms["bx"] * x + settings$def_parms["ba"] + settings$def_parms["bxa"] * x
+  pi0 <- plogis(lp0)
+  pi1 <- plogis(lp1)
+  
+  lp2 <- settings$def_parms["b0"] + settings$def_parms["bx"]*x + parms[1] + parms[2]*(settings$def_parms["ba"] + settings$def_parms["bxa"]*x)
+  p0 <- plogis(lp0)
+  p1 <- plogis(lp2)
+
+  h <- pi0-pi1
+  H <- p0-p1
+  
+  a <- rbinom(N, 1, 0.5)
+  Y <- rbinom(N,1,p0*(1-a)+p1*a)
+  
+  r12 <- cumulcalibB(Y, h, a, pi0)
+  #r2 <- cumulcalibB(Y, h, a, pi0, method = "BB")
+  r34 <- cumulcalibB(Y, h, a)
+  #r4 <- cumulcalibB(Y, h, a, method = "BB")
+  
+  data.frame(
+    i = rep(isim, 4),
+    N = rep(N, 4),
+    scenario = rep(nm, 4),
+    Test = c("1pm1", "2pm1", "1pm2", "2pm2"),
+    pval = c(r12$by_method$BM$pval, r12$by_method$BB$pval, r34$by_method$BM$pval, r34$by_method$BB$pval)
+  )
+}
+
+h1a_sim_data <- bind_rows(res_list)
+stopCluster(cl)
+
+saveRDS(h1a_sim_data, paste0(res_path,"h1a_sim_data.RDS"))
+rm(res_list)
+```
+
+
+
+
+### Bar plots for H1a
+```{r, eval=TRUE}
+if(!exists("settings")) {load_module("settings")}
+if(!exists("h1a_sim_data")) {load_module("h1a_sim_data")}
+
+sp <- settings$h1a_sim_parms
+
+plts <- list()
+
+index <- 1
+
+for(i in 1:length(sp$scenarios))
+{
+  plt_data <- data.frame()
+  scenario_ <- paste0("s",i)
+  for(j in 1:length(sp$N))
+  {
+    N_ <- sp$N[j]
+    this_df  <- h1a_sim_data %>% filter(N==N_, scenario==scenario_, Test=="1pm1")
+    plt_data <- rbind(plt_data,data.frame(N=N_, Test="1pm1", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1a_sim_data %>% filter(N==N_, scenario==scenario_, Test=="2pm1")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="2pm1", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1a_sim_data %>% filter(N==N_, scenario==scenario_, Test=="1pm2")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="1pm2", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1a_sim_data %>% filter(N==N_, scenario==scenario_, Test=="2pm2")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="2pm2", "pval"=mean(this_df$pval<=0.05)))
+  }
+  plt_data$N <- factor(plt_data$N, levels=as.character(sort(unique(plt_data$N))))
+  plt_data$Test <- factor(plt_data$Test, levels=names(proper_colors))
+  plt <- ggplot(data=plt_data, aes(x=N, y=pval, color=Test, fill=Test)) +
+    geom_bar_pattern(
+      stat = "identity",
+      position = position_dodge(),
+      # pattern only for 1pm1 and 1pm2
+      pattern = ifelse(plt_data$Test %in% c("1pm1", "1pm2"), "stripe", "none"),
+      # use the same color underneath
+      fill = proper_colors[as.character(plt_data$Test)],
+      pattern_fill = proper_colors[as.character(plt_data$Test)],       # color of the stripe
+      pattern_color = "white",      # border of the pattern
+      pattern_density = 0.3,
+      pattern_spacing = 0.02,
+      pattern_angle = 45,
+      pattern_alpha = 0.99,
+      linewidth = 0.2,
+      # key_glyph = draw_key_polygon
+    )+
+    geom_text(
+      aes(label=round(pval, digits=2), y=pval+0.1, group=Test),
+      position=position_dodge(width=1),
+      angle=90, size=2, color="black"
+    ) +
+    scale_color_manual(
+      name   = "Test: ",
+      values=proper_colors,
+      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
+                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+    ) +
+    scale_fill_manual(
+      name   = "Test: ",
+      values=proper_colors,
+      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
+                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+    ) +
+    annotate(geom="text", x=0, y=0.9, label=scenario_, parse=TRUE, hjust=0) +
+    ylim(0,1.1) +
+    labs(x = "", y = "") +
+    theme_minimal() + 
+    theme(plot.margin=unit(c(0,0,0,0),'lines'), 
+          axis.text=element_text(size=4), 
+          legend.position = "top")+
+    guides(fill = guide_legend(override.aes = list(
+      pattern = c("stripe","none","stripe","none"),
+      fill = proper_colors,
+      #pattern_fill = c("stripe","none","stripe","none"),
+      color=proper_colors,
+      linewidth=0.2
+    ))) 
+
+  plts[[index]] <- plt
+  index <- index+1
+}
+
+
+ggarrange(plotlist=plts, common.legend=TRUE, legend="top")
+ggsave(paste0(res_path,"h1a_sim_bars.pdf"), width=9, height=6, bg="white", device=cairo_pdf())
+
+```
+
+
+
+
+
+
+
+
+## H1b
+
+#### Calibration curves for H1b
+```{r, eval=TRUE}
+sp <- settings$h1b_sim_parms
+plts_h <- list()
+mc <- ici <- c()
+
+
+g <- function(lp, a, b)
+{
+  a+b*sign(lp)*abs(lp)^b
+}
+
+
+x <- qnorm((1:100)/101)
+l0 <- settings$def_parms[1]+settings$def_parms[2]*x
+l1 <- settings$def_parms[1]+settings$def_parms[2]*x+settings$def_parms[3]+settings$def_parms[4]*x
+pi0 <- expit(l0)
+pi1 <- expit(l1)
+
+index <- 1
+ici <- c()
+
+for(i in 1:length(sp$scenarios))
+{
+  parms <- sp$scenarios[[i]]
+  
+  p0 <- expit(g(l0,parms['a0'],parms['b0']))
+  p1 <- expit(g(l1,parms['a1'],parms['b1']))
+  
+  h <- pi0-pi1
+  H <- p0-p1
+  
+  df <- data.frame(pred=h, actual=H)
+  mc <- c(mc, mean(H-h))
+  ici <- c(ici, mean(abs(H-h)))
+  
+  df_binned <- df %>%
+    mutate(bin = cut(pred, quantile(pred,(1:100)/100))) %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(pred, na.rm = TRUE),
+      mean_actual = mean(actual, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  scenario_ <- names(sp$scenarios)[i]
+  
+  L <- -0.1 #min(df_binned$mean_pred, df_binned$mean_actual)
+  H <- +0.3 #max(df_binned$mean_pred, df_binned$mean_actual)
+  
+  plt_h <- ggplot(data=df_binned, aes(x=mean_pred, y=mean_actual)) +
+    geom_abline(col="gray")+
+    geom_line()+
+    #ggtitle(scenario_)+
+    labs(x = "", y = "")+
+    xlim(L,H)+ylim(L,H)+
+    annotate(geom="text", x=L, y=H, label=paste0("s",i,":{",paste(parms, collapse=","),"}"), parse=FALSE, hjust=0, size=2)+
+    annotate(geom="text", x=H, y=L+(H-L)/10, label=paste0("E(delta*\"*\" - delta)==",sprintf("%.3f",mc[i])), parse=TRUE, hjust=1, size=2)+
+    annotate(geom="text", x=H, y=L, label=paste0("E(abs(delta*\"*\" - delta))==",sprintf("%.3f",ici[i])), parse=TRUE, hjust=1, size=2)+
+    theme_minimal() + theme(plot.margin=unit(c(0,0,0,0),'lines'), axis.text=element_text(size=6), legend.position="none")
+  plts_h[[index]] <- plt_h
+  
+  index <- index+1
+}
+
+ggarrange(plotlist=plts_h, widths = 6, heights = 4)
+ggsave(paste0(res_path,"h1b_calibs_h.pdf"), width=6, height=4, bg="white", device = cairo_pdf())
+
+```
+
+
+
+### H1b simulations
+```{r, eval=TRUE}
+
+set.seed(seed)
+sp <- settings$h1b_sim_parms
+n_sim <- sp$n_sim
+n_run <- n_sim * length(sp$N) * length(sp$scenarios) * 4
+
+n_cores <- parallel::detectCores()-2
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Create all parameter combinations
+param_grid <- expand.grid(
+  isim = 1:n_sim,
+  i = 1:length(sp$N),
+  j = 1:length(sp$scenarios),
+  stringsAsFactors = FALSE
+)
+
+# Parallel loop
+res_list <- foreach(idx = 1:nrow(param_grid), .packages = c("cumulcalib")) %dopar% {
+  row <- param_grid[idx, ]
+  isim <- row$isim
+  i <- row$i
+  j <- row$j
+  
+  N <-  sp$N[i]
+  nm <- names(sp$scenarios)[j]
+  
+  x <- rnorm(N)
+  
+  l0 <- settings$def_parms[1]+settings$def_parms[2]*x
+  l1 <- settings$def_parms[1]+settings$def_parms[2]*x+settings$def_parms[3]+settings$def_parms[4]*x
+  pi0 <- expit(l0)
+  pi1 <- expit(l1)
+  
+  parms <- sp$scenarios[[j]]
+  
+  p0 <- expit(g(l0,parms['a0'],parms['b0']))
+  p1 <- expit(g(l1,parms['a1'],parms['b1']))
+  
+  h <- pi0-pi1
+  a <- rbinom(N, 1, 0.5)
+  Y <- rbinom(N,1,p0*(1-a)+p1*a)
+  
+  r1 <- cumulcalibB(Y, h, a, pi0, method = "BM")
+  r2 <- cumulcalibB(Y, h, a, pi0, method = "BB")
+  r3 <- cumulcalibB(Y, h, a, method = "BM")
+  r4 <- cumulcalibB(Y, h, a, method = "BB")
+  
+  data.frame(
+    i = rep(isim, 4),
+    N = rep(N, 4),
+    scenario = rep(nm, 4),
+    Test = c("1pm1", "2pm1", "1pm2", "2pm2"),
+    pval = c(r1$pval, r2$pval, r3$pval, r4$pval)
+  )
+}
+
+h1b_sim_data <- bind_rows(res_list)
+stopCluster(cl)
+
+saveRDS(h1b_sim_data, paste0(res_path,"h1b_sim_data.RDS"))
+rm(res_list)
+```
+
+
+
+
+### Bar plots for H1b
+```{r, eval=TRUE}
+if(!exists("settings")) {load_module("settings")}
+if(!exists("h1b_sim_data")) {load_module("h1b_sim_data")}
+
+sp <- settings$h1b_sim_parms
+
+plts <- list()
+
+index <- 1
+
+for(i in 1:length(sp$scenarios))
+{
+  plt_data <- data.frame()
+  scenario_ <- names(sp$scenarios)[i]
+  for(j in 1:length(sp$N))
+  {
+    N_ <- sp$N[j]
+    this_df  <- h1b_sim_data %>% filter(N==N_, scenario==scenario_, Test=="1pm1")
+    plt_data <- rbind(plt_data,data.frame(N=N_, Test="1pm1", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1b_sim_data %>% filter(N==N_, scenario==scenario_, Test=="2pm1")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="2pm1", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1b_sim_data %>% filter(N==N_, scenario==scenario_, Test=="1pm2")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="1pm2", "pval"=mean(this_df$pval<=0.05)))
+    this_df  <- h1b_sim_data %>% filter(N==N_, scenario==scenario_, Test=="2pm2")
+    plt_data <- rbind(plt_data, data.frame(N=N_, Test="2pm2", "pval"=mean(this_df$pval<=0.05)))
+  }
+  plt_data$N <- factor(plt_data$N, levels=as.character(sort(unique(plt_data$N))))
+  plt_data$Test <- factor(plt_data$Test, levels=names(proper_colors))
+  plt <- ggplot(data=plt_data, aes(x=N, y=pval, color=Test, fill=Test)) +
+    geom_bar_pattern(
+      stat = "identity",
+      position = position_dodge(),
+      # pattern only for 1pm1 and 1pm2
+      pattern = ifelse(plt_data$Test %in% c("1pm1", "1pm2"), "stripe", "none"),
+      # use the same color underneath
+      fill = proper_colors[as.character(plt_data$Test)],
+      pattern_fill = proper_colors[as.character(plt_data$Test)],       # color of the stripe
+      pattern_color = "white",      # border of the pattern
+      pattern_density = 0.3,
+      pattern_spacing = 0.02,
+      pattern_angle = 45,
+      pattern_alpha = 0.99,
+      linewidth = 0.2,
+      # key_glyph = draw_key_polygon
+    )+
+    geom_text(
+      aes(label=round(pval, digits=2), y=pval+0.1, group=Test),
+      position=position_dodge(width=1),
+      angle=90, size=2, color="black"
+    ) +
+    scale_color_manual(
+      name   = "Test: ",
+      values=proper_colors,
+      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
+                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+    ) +
+    scale_fill_manual(
+      name   = "Test: ",
+      values=proper_colors,
+      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
+                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+    ) +
+    annotate(geom="text", x=0, y=0.9, label=names(sp$scenarios)[i], parse=TRUE, hjust=0) +
+    ylim(0,1.1) +
+    labs(x = "", y = "") +
+    theme_minimal() + 
+    theme(plot.margin=unit(c(0,0,0,0),'lines'), 
+          axis.text=element_text(size=4), 
+          legend.position = "top")+
+    guides(fill = guide_legend(override.aes = list(
+      pattern = c("stripe","none","stripe","none"),
+      fill = proper_colors,
+      #pattern_fill = c("stripe","none","stripe","none"),
+      color=proper_colors,
+      linewidth=0.2
+    ))) 
+
+  plts[[index]] <- plt
+  index <- index+1
+}
+
+
+ggarrange(plotlist=plts, common.legend=TRUE, legend="top")
+ggsave(paste0(res_path,"h1b_sim_bars.pdf"), width=9, height=6, bg="white", device=cairo_pdf())
+
+```
+
+
+
+
+
+### GUSTO
+```{r}
+set.seed(seed)
+
+data(gusto)
+
+## Coding the treatment groups ##
+df <- gusto %>% filter(tx!="SK+tPA")
+df$a <- ifelse(df$tx=="tPA", 1, 0)*1 ## 1 for TPA 0 for other (SKA or SKA combo)
+df$Y <- df$day30
+df$kill <- (as.numeric(df$Killip)>1)*1 ## Killip Class Binary (0 = KC 1) 
+
+data_us <- df[df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),] 
+data_other <- df[!df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),]
+
+dev_dataL <- data_other ## training data
+dev_dataS <- data_other[sample(nrow(data_other), size=nrow(data_other)/10, replace=F),]
+
+val_dataL <- data_us ## validation data
+val_dataS <- data_us[sample(nrow(data_us), size=nrow(data_us)/10, replace=F),]
+
+
+collector$gusto$sample_sizes <- c(devS=nrow(dev_dataS), devL=nrow(dev_dataL), valS=nrow(val_dataS), valL=nrow(val_dataL))
+
+collector$gusto$prevs <- c(devS=mean(dev_dataS$Y), devL=mean(dev_dataL$Y), valS=mean(val_dataS$Y), valL=mean(val_dataL$Y))
+tmp <- cbind(devS=ate(dev_dataS$Y, dev_dataS$a), devL=ate(dev_dataL$Y,dev_dataL$a), valS=ate(val_dataS$Y,val_dataS$a), valL=ate(val_dataL$Y,val_dataL$a))
+collector$gusto$ATEs <- tmp[1,]
+collector$gusto$ATE_SEs <- sqrt(tmp[2,])
+
+
+ite_modelL <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
+                   a + a:sex + a:age, data = dev_dataL,
+                  family=binomial(link="logit"))
+
+
+ite_modelS <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
+                   a + a:sex + a:age, data = dev_dataS,
+                  family=binomial(link="logit"))
+
+collector$gusto$modelS$model <- summary(ite_modelS)
+collector$gusto$modelL$model <- summary(ite_modelL)
+
+
+
+for(src in c("L","S"))
+  for(dest in c("L","S")){
+    ite_model <- get(paste0("ite_model",src))
+    dt <- get(paste0("val_data",dest))
+    tmp <- dt
+    tmp$a<-0
+    p0 <- predict(ite_model, newdata=tmp, type="response")
+    tmp$a<-1
+    p1 <- predict(ite_model, newdata=tmp, type="response")
+    df <- data.frame(Y=dt$Y, p0=p0, h=p0-p1, t=dt$a)
+    df <- df[order(df$h),]
+  
+    res <- cumulcalibB(df$Y, df$h, df$t, df$p0, method = "BB")
+    png(paste0(res_path,"gusto_rw_",src,dest,"1.png"), width = 2000, height = 1500, res = 300)
+    plot(res)
+    dev.off()
+    plot(res)
+    collector$gusto[[paste0("res",src,dest,"1")]] <- res
+    
+    res <- cumulcalibB(df$Y, df$h, df$t, method = "BB")
+    png(paste0(res_path,"gusto_rw_",src,dest,"2.png"), width = 2000, height = 1500, res = 300)
+    plot(res)
+    dev.off()
+    plot(res)
+    collector$gusto[[paste0("res",src,dest,"2")]] <- res
+  }
+
+saveRDS(collector, paste0(res_path,"collector.RDS"))
+```
+
+
+
