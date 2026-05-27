@@ -1,0 +1,2078 @@
+---
+title: Expectation over the posterior distribution of predicted risks provides partial protection agaisnt overfitting
+author: "Mohsen Sadatsafavi"
+date: "2026.05.27"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tidyverse)
+library(broom)
+library(ggrepel)
+library(brglm2)
+library(brms)
+library(glmnet)
+library(mcmapper)
+library(parallel)
+library(foreach)
+library(doSNOW)
+library(doRNG)
+library(WeightedROC)
+library(pROC)
+library(predtools)
+library(tableone)
+library(randtoolbox)
+library(dplyr)
+library(ggplot2)
+library(ggh4x)  # facet_grid2 with independent y-scales per panel
+
+res_dir <- "M:/Projects/2026/Project.BayesCPM/results/wip/"
+
+
+source("core.R")
+```
+
+
+
+
+
+## Simulation studies
+```{r}
+
+# =========================================================================
+# Settings
+# =========================================================================
+settings <- list(
+  # Design factors
+  M                = 275,
+  true_models      = c(3, 10, 30),
+  candidate_models = c(3, 10, 30),
+  prevalences      = c(0.05, 0.15, 0.30),
+  epvs             = c(5, 10, 30),
+  correlations     = c(0, 0.25, 0.50),
+  # Use quasi-Monte Carlo (Sobol) for population X to reduce MC error on
+  # population-level metrics. Training sample X_sam always uses plain MC.
+  use_qmc          = TRUE,
+  n_pop            = 1e4,
+  design_seed      = 42,
+
+  # log-F(m, m) prior strength for slopes (intercept stays flat).
+  # m = 1 is Greenland & Mansournia's preferred general-purpose default.
+  logf_m = 2,
+
+  # Methods to compare
+   methods = c('pe_f', 
+              'pm_f', 'pm_f_mk', 'pm_f_pp', '_pm_f_cpp',
+              'pe_j',  'pm_j', 'pm_j_mk', 'pm_j_pp', '_pm_j_cpp', 
+              'pe_lf', 'pm_lf', 'pm_lf_mk', 'pm_lf_pp',  '_pm_lf_cpp',
+              'pe_br', 'pm_br', 'pm_br_mk', 'pm_br_pp', '_pm_br_cpp',
+              'pe_lasso_min', 'pe_ridge_min'),
+
+  # Performance metrics
+  # NOTE: metrics are now evaluated against pi_true_pop (soft labels)
+  # rather than y_pop. This removes Bernoulli sampling noise.
+  metrics = c("dkl", "mse", "cstat", "oe_ratio", "cal_int", "cal_slp", "snb"),
+  # NB thresholds as quantiles of true risk:
+  z_quant = c(0.25, 0.5, 0.75),   #c(0.5, 1, 1.5),
+
+  # Credible-interval coverage levels to evaluate. For each level, the
+  # eta-scale credible interval is constructed from the multivariate-normal
+  # posterior approximation and coverage is measured against the known
+  # population true linear predictor. Applies only to the four Bayesian
+  # families (flat, Jeffreys, log-F, Bayesian ridge) — frequentist CV-tuned
+  # ridge / LASSO have no Laplace posterior so coverage is not defined.
+  # Set to NULL or empty to skip.
+  cri_cov = c(0.95),
+
+  # Posterior-distribution calibration via the probability integral
+  # transform (PIT). For each individual, u_i = Phi((eta_pseudo_i - mu_i)
+  # / sigma_i). If the Laplace-approximated posterior is calibrated, the
+  # u_i are uniformly distributed on [0,1]. We summarise this via three
+  # quantile checks: F_emp(0.10), F_emp(0.50), F_emp(0.90) — fractions of
+  # PIT values below each fixed threshold. Targets are 0.10, 0.50, and
+  # 0.90 respectively. The pattern across the three is interpretable:
+  # both 10% and 90% above target = posterior too narrow; below target =
+  # too wide; both shifted in the same direction = location bias.
+  # Computed automatically whenever cri_cov is non-empty.
+
+  # Execution
+  n_cores    = NULL,
+  chunk_size = 100
+)
+
+saveRDS(settings,  file = paste0(res_dir, "settings_synth.rds"))
+
+
+```
+
+
+
+
+```{R}
+# =========================================================================
+# generate_sim_design
+# =========================================================================
+generate_sim_design <- function(settings) {
+  set.seed(settings$design_seed)
+
+  fixed <- expand.grid(
+    true_p      = settings$true_models,
+    candidate_p = settings$candidate_models,
+    prevalence  = settings$prevalences,
+    epv         = settings$epvs,
+    stringsAsFactors = FALSE
+  )
+
+  n_scenarios <- nrow(fixed)
+  M <- settings$M
+
+  fixed$n_sample <- with(fixed, ceiling((candidate_p + 1) * epv / prevalence))
+
+  design <- fixed[rep(seq_len(n_scenarios), each = M), ]
+  design$iteration <- rep(seq_len(M), times = n_scenarios)
+  design$scenario  <- rep(seq_len(n_scenarios), each = M)
+
+  n_total <- nrow(design)
+
+  design$n_binary <- sapply(design$true_p, function(p) sample(0:p, 1))
+  design$correlation <- sample(settings$correlations, n_total, replace = TRUE)
+
+  design$n_continuous    <- design$true_p - design$n_binary
+  design$misspecified    <- design$true_p != design$candidate_p
+  design$candidate_larger  <- design$candidate_p > design$true_p
+  design$candidate_smaller <- design$candidate_p < design$true_p
+
+  design <- design[, c(
+    "scenario", "iteration",
+    "true_p", "candidate_p", "misspecified",
+    "candidate_larger", "candidate_smaller",
+    "prevalence", "epv", "n_sample",
+    "n_binary", "n_continuous", "correlation"
+  )]
+
+  rownames(design) <- NULL
+
+  cat("Simulation design summary:\n")
+  cat("  Fixed scenarios:", n_scenarios, "\n")
+  cat("  Replicates per scenario:", M, "\n")
+  cat("  Total rows:", n_total, "\n")
+  cat("  Sample size range:", min(design$n_sample), "-", max(design$n_sample), "\n")
+  cat("\n  Scenario breakdown:\n")
+  cat("    True model sizes:", paste(settings$true_models, collapse = ", "), "\n")
+  cat("    Candidate model sizes:", paste(settings$candidate_models, collapse = ", "), "\n")
+  cat("    Prevalences:", paste(settings$prevalences, collapse = ", "), "\n")
+  cat("    EPVs:", paste(settings$epvs, collapse = ", "), "\n")
+  cat("    Correctly specified:", sum(!design$misspecified), "/", n_total,
+      "(", round(100 * mean(!design$misspecified), 1), "%)\n")
+  cat("    Candidate larger:", sum(design$candidate_larger), "/", n_total,
+      "(", round(100 * mean(design$candidate_larger), 1), "%)\n")
+  cat("    Candidate smaller:", sum(design$candidate_smaller), "/", n_total,
+      "(", round(100 * mean(design$candidate_smaller), 1), "%)\n")
+
+  design
+}
+
+# =========================================================================
+# generate_from_design
+# =========================================================================
+generate_from_design <- function(design, row_idx, settings) {
+  r <- design[row_idx, ]
+
+  n       <- r$n_sample
+  p_true  <- r$true_p
+  p_cand  <- r$candidate_p
+  n_bin   <- r$n_binary
+  cor_val <- r$correlation
+  prev    <- r$prevalence
+  n_pop   <- settings$n_pop
+
+  # Plain MC: standard Gaussian draw then Cholesky rotation
+  generate_X <- function(n_obs, p_true, n_bin, L) {
+    Z <- matrix(rnorm(n_obs * p_true), n_obs, p_true)
+    X <- Z %*% L
+    if (n_bin > 0) {
+      for (j in 1:n_bin) {
+        X[, j] <- as.numeric(X[, j] > 0)
+      }
+    }
+    colnames(X) <- paste0("X", seq_len(p_true))
+    X
+  }
+
+  # QMC: unscrambled Sobol, qnorm to standard normal, Cholesky rotation.
+  # init = TRUE restarts the sequence each call so population X is
+  # deterministic given (p_true, n_bin, L) for reproducibility. Clamp
+  # to avoid qnorm returning Inf at sequence endpoints.
+  generate_X_qmc <- function(n_obs, p_true, n_bin, L) {
+    sob <- randtoolbox::sobol(n_obs, dim = p_true, init = TRUE)
+    sob <- pmin(pmax(sob, 1e-10), 1 - 1e-10)
+    Z <- qnorm(sob)
+    X <- Z %*% L
+    if (n_bin > 0) {
+      for (j in 1:n_bin) {
+        X[, j] <- as.numeric(X[, j] > 0)
+      }
+    }
+    colnames(X) <- paste0("X", seq_len(p_true))
+    X
+  }
+
+  build_df <- function(X, y, p_true, p_cand, n_obs) {
+    if (p_cand > p_true) {
+      n_extra <- p_cand - p_true
+      X_extra <- matrix(rnorm(n_obs * n_extra), n_obs, n_extra)
+      colnames(X_extra) <- paste0("X", (p_true + 1):p_cand)
+      X_all <- cbind(X, X_extra)
+    } else {
+      X_all <- X
+    }
+    df <- as.data.frame(X_all)
+    df$Y <- y
+    df
+  }
+
+  Sigma_x <- matrix(cor_val, p_true, p_true)
+  diag(Sigma_x) <- 1
+  L <- chol(Sigma_x)
+
+  set.seed(r$scenario * 10000 + r$iteration)
+  true_beta <-  rexp(p_true, rate=1/0.354)*sample(c(-1, 1), p_true, replace = TRUE) #rnorm(p_true, mean = 0, sd = 0.5) #rt(p_true,5)/sqrt(5/3)/2 #rexp(p_true, rate = 1/0.354) * sample(c(-1, 1), p_true, replace = TRUE) #rnorm(p_true, mean = 0, sd = 0.5)
+
+  # Population X: Sobol if enabled, else plain MC.
+  # Training X (X_sam) is always plain MC — methods must be evaluated on
+  # genuine random samples, not low-discrepancy designs.
+  if (isTRUE(settings$use_qmc)) {
+    X_pop <- generate_X_qmc(n_pop, p_true, n_bin, L)
+  } else {
+    X_pop <- generate_X(n_pop, p_true, n_bin, L)
+  }
+
+  find_intercept <- function(X, beta, target_prev, tol = 1e-6) {
+    lo <- -10; hi <- 10
+    for (i in 1:100) {
+      mid <- (lo + hi) / 2
+      p_mean <- mean(plogis(mid + X %*% beta))
+      if (p_mean < target_prev) lo <- mid else hi <- mid
+      if (abs(p_mean - target_prev) < tol) break
+    }
+    mid
+  }
+
+  intercept <- find_intercept(X_pop, true_beta, prev)
+  true_vars <- c(intercept, true_beta)
+  names(true_vars) <- c("Intercept", paste0("X", seq_len(p_true)))
+
+  eta_pop <- as.numeric(intercept + X_pop %*% true_beta)
+  pi_pop <- plogis(eta_pop)
+  y_pop <- rbinom(n_pop, 1, pi_pop)
+  df_pop <- build_df(X_pop, y_pop, p_true, p_cand, n_pop)
+
+  X_sam <- generate_X(n, p_true, n_bin, L)
+  eta_sam <- as.numeric(intercept + X_sam %*% true_beta)
+  pi_sam <- plogis(eta_sam)
+  y_sam <- rbinom(n, 1, pi_sam)
+  df_sam <- build_df(X_sam, y_sam, p_true, p_cand, n)
+
+  true_names <- paste0("X", seq_len(p_true))
+  cand_names <- paste0("X", seq_len(p_cand))
+
+  formula_true <- as.formula(paste("Y ~", paste(true_names, collapse = " + ")))
+  formula_cand <- as.formula(paste("Y ~", paste(cand_names, collapse = " + ")))
+
+  # Pseudo-true linear predictor for the candidate model.
+  #
+  # Three cases by predictor count (predictors are X1..Xp_true and X1..Xp_cand
+  # in this design, so the count comparison is sufficient):
+  #
+  #   1. p_cand == p_true: candidate exactly matches truth.
+  #      pseudo-true beta = true beta, so eta_pseudo_pop = eta_pop.
+  #   2. p_cand > p_true:  candidate nests truth with redundant extras.
+  #      pseudo-true beta = (true beta, 0, ..., 0), reproducing the truth
+  #      exactly in the candidate's coordinate system. Coverage target is
+  #      still eta_pop — no regression needed.
+  #   3. p_cand < p_true:  candidate misses some true predictors.
+  #      pseudo-true beta is the KL projection: a population logistic
+  #      regression of pi_pop (soft labels) on the candidate predictors.
+  #      This is the only case where a regression is actually needed.
+  if (p_cand >= p_true) {
+    eta_pseudo_pop <- eta_pop
+  } else {
+    # Build the candidate's population design matrix locally (mm_pop in
+    # sim() is built from df_pop and formula_cand; same construction here).
+    mm_pop_cand <- model.matrix(formula_cand, df_pop)
+    pseudo_fit <- suppressWarnings(
+      glm.fit(mm_pop_cand, pi_pop, family = binomial())
+    )
+    eta_pseudo_pop <- as.numeric(mm_pop_cand %*% pseudo_fit$coefficients)
+  }
+
+  list(
+    sample         = df_sam,
+    population     = df_pop,
+    pi_true_sample = pi_sam,
+    pi_true_pop    = pi_pop,
+    eta_pseudo_pop = eta_pseudo_pop,
+    true_vars      = true_vars,
+    true_beta      = true_beta,
+    formula_true   = formula_true,
+    formula_cand   = formula_cand,
+    design_row     = r
+  )
+}
+
+
+
+# =========================================================================
+# sim
+# =========================================================================
+sim <- function(i_row) {
+  sim_parms <- generate_from_design(df_design, i_row, settings)
+
+  df_samp <- sim_parms$sample
+  df_pop  <- sim_parms$population
+
+  fm_model <- sim_parms$formula_cand
+
+  mm_samp <- model.matrix(fm_model, df_samp)
+  mm_pop  <- model.matrix(fm_model, df_pop)
+  y_samp  <- df_samp$Y
+  y_pop   <- df_pop$Y                      # kept for diagnostics / A/B checks
+  pi_true_pop <- sim_parms$pi_true_pop     # soft labels used for evaluation
+
+  n_pop   <- nrow(mm_pop)
+  preds   <- matrix(NA_real_, nrow = n_pop, ncol = 0)
+
+  binom_fam <- binomial()
+
+  pred_pop <- function(beta) as.numeric(plogis(mm_pop %*% beta))
+
+  add_pred <- function(preds, values, name) {
+    preds <- cbind(preds, values)
+    colnames(preds)[ncol(preds)] <- name
+    preds
+  }
+
+  # --- need_* flags. Naming convention matches GUSTO sim:
+  #   _f  = flat (unpenalised MLE)
+  #   _j  = Jeffreys (Firth-penalised PE)
+  #   _lf = log-F prior
+  #   _br = Bayesian ridge
+  # Within each family: _mk = MacKay (probit) approximation; _pp = self-
+  # projection; _cpp = constrained (CITL-preserving) self-projection.
+  need_mle <- any(c("pe_f", "pm_f", "pm_f_mk", "pm_f_pp", "pm_f_cpp") %in% settings$methods)
+  need_j   <- any(c("pe_j", "pm_j", "pm_j_mk", "pm_j_pp", "pm_j_cpp") %in% settings$methods)
+  need_lf  <- any(c("pe_lf", "pm_lf", "pm_lf_mk", "pm_lf_pp", "pm_lf_cpp") %in% settings$methods)
+  need_br  <- any(c("pe_br", "pm_br", "pm_br_mk", "pm_br_pp", "pm_br_cpp") %in% settings$methods)
+
+  # Coverage of credible intervals is requested if cri_cov is a non-empty
+  # numeric vector. Any family that runs will need its posterior covariance
+  # for coverage even if no PM method consumes it, so the V_* guards below
+  # are widened to also fire when cri_wanted is TRUE.
+  cri_wanted <- isTRUE(length(settings$cri_cov) > 0)
+  eta_pseudo_pop <- if (cri_wanted) sim_parms$eta_pseudo_pop else NULL
+  posteriors <- list()  # collects (mu, V) per Bayesian family for coverage
+
+  # --- Unpenalised MLE family (flat prior) ---
+  reg <- NULL
+  if (need_mle || need_j) {
+    reg <- tryCatch(
+      glm.fit(mm_samp, y_samp, family = binom_fam),
+      warning = function(w) suppressWarnings(glm.fit(mm_samp, y_samp, family = binom_fam))
+    )
+    if (!reg$converged) return(NULL)
+
+    mu_f <- reg$coefficients
+    V_f  <- NULL
+
+    if (any(c("pm_f", "pm_f_mk", "pm_f_pp", "pm_f_cpp") %in% settings$methods) ||
+        (cri_wanted && need_mle)) {
+      w <- reg$weights
+      V_f <- chol2inv(chol(crossprod(mm_samp * sqrt(w))))
+    }
+    if (cri_wanted && need_mle && !is.null(V_f)) {
+      posteriors[["pe_f"]] <- list(mu = mu_f, V = V_f)
+    }
+
+    if ("pe_f" %in% settings$methods) {
+      preds <- add_pred(preds, pred_pop(mu_f), "pe_f")
+    }
+    if ("pm_f" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_f, V_f), "pm_f")
+    }
+    if ("pm_f_mk" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_f, V_f, "mackay"), "pm_f_mk")
+    }
+    if (any(c("pm_f_pp", "pm_f_cpp") %in% settings$methods)) {
+      pm_samp_f <- predict_pm(mm_samp, mu_f, V_f)
+    }
+    if ("pm_f_pp" %in% settings$methods) {
+      reg_f_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_f, family = binom_fam))
+      preds <- add_pred(preds, pred_pop(reg_f_pp$coefficients), "pm_f_pp")
+    }
+    if ("pm_f_cpp" %in% settings$methods) {
+      cfs <- project_constrained_kl(pm_samp_f, mm_samp, sum(y_samp))
+      preds <- add_pred(preds, pred_pop(cfs), "pm_f_cpp")
+    }
+  }
+
+  # --- Jeffreys family (Firth-penalised PE) ---
+  if (need_j) {
+    reg_glm <- tryCatch({
+      fit <- suppressWarnings(glm(fm_model, data = df_samp, family = binomial()))
+      update(fit, method = "brglmFit", type = "AS_mean")
+    }, error = function(e) NULL)
+
+    if (is.null(reg_glm) || !reg_glm$converged) return(NULL)
+
+    mu_j <- coef(reg_glm)
+    V_j  <- NULL
+
+    if (any(c("pm_j", "pm_j_mk", "pm_j_pp", "pm_j_cpp") %in% settings$methods) ||
+        cri_wanted) {
+      V_j <- vcov(reg_glm)
+    }
+    if (cri_wanted && !is.null(V_j)) {
+      posteriors[["pe_j"]] <- list(mu = mu_j, V = V_j)
+    }
+
+    if ("pe_j" %in% settings$methods) {
+      preds <- add_pred(preds, pred_pop(mu_j), "pe_j")
+    }
+    if ("pm_j" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_j, V_j), "pm_j")
+    }
+    if ("pm_j_mk" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_j, V_j, "mackay"), "pm_j_mk")
+    }
+    if (any(c("pm_j_pp", "pm_j_cpp") %in% settings$methods)) {
+      pm_samp_j <- predict_pm(mm_samp, mu_j, V_j)
+    }
+    if ("pm_j_pp" %in% settings$methods) {
+      reg_j_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_j, family = binom_fam))
+      preds <- add_pred(preds, pred_pop(reg_j_pp$coefficients), "pm_j_pp")
+    }
+    if ("pm_j_cpp" %in% settings$methods) {
+      cfs <- project_constrained_kl(pm_samp_j, mm_samp, sum(y_samp))
+      preds <- add_pred(preds, pred_pop(cfs), "pm_j_cpp")
+    }
+  }
+
+  # --- log-F(m, m) family ---
+  # Weakly-informative shrinkage prior on slopes (intercept flat).
+  # See Greenland & Mansournia 2015. logf_glm() is in core.R.
+  if (need_lf) {
+    reg_lf <- tryCatch(
+      logf_glm(mm_samp, y_samp, m = settings$logf_m),
+      error = function(e) NULL
+    )
+    if (is.null(reg_lf) || !reg_lf$converged) return(NULL)
+
+    mu_lf <- coef(reg_lf)
+    V_lf  <- NULL
+
+    if (any(c("pm_lf", "pm_lf_mk", "pm_lf_pp", "pm_lf_cpp") %in% settings$methods) ||
+        cri_wanted) {
+      V_lf <- vcov(reg_lf)
+    }
+    if (cri_wanted && !is.null(V_lf)) {
+      posteriors[["pe_lf"]] <- list(mu = mu_lf, V = V_lf)
+    }
+
+    if ("pe_lf" %in% settings$methods) {
+      preds <- add_pred(preds, pred_pop(mu_lf), "pe_lf")
+    }
+    if ("pm_lf" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_lf, V_lf), "pm_lf")
+    }
+    if ("pm_lf_mk" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, mu_lf, V_lf, "mackay"), "pm_lf_mk")
+    }
+    if (any(c("pm_lf_pp", "pm_lf_cpp") %in% settings$methods)) {
+      pm_samp_lf <- predict_pm(mm_samp, mu_lf, V_lf)
+    }
+    if ("pm_lf_pp" %in% settings$methods) {
+      reg_lf_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_lf, family = binom_fam))
+      preds <- add_pred(preds, pred_pop(reg_lf_pp$coefficients), "pm_lf_pp")
+    }
+    if ("pm_lf_cpp" %in% settings$methods) {
+      cfs <- project_constrained_kl(pm_samp_lf, mm_samp, sum(y_samp))
+      preds <- add_pred(preds, pred_pop(cfs), "pm_lf_cpp")
+    }
+  }
+
+  # --- Bayesian ridge family ---
+  if (need_br) {
+    reg_br <- tryCatch(
+      bayesian_ridge(mm_samp, y_samp),
+      error = function(e) NULL
+    )
+    if (is.null(reg_br)) return(NULL)
+
+    if (cri_wanted) {
+      posteriors[["pe_br"]] <- list(mu = reg_br$beta, V = reg_br$V)
+    }
+
+    if ("pe_br" %in% settings$methods) {
+      preds <- add_pred(preds, pred_pop(reg_br$beta), "pe_br")
+    }
+    if ("pm_br" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, reg_br$beta, reg_br$V), "pm_br")
+    }
+    if ("pm_br_mk" %in% settings$methods) {
+      preds <- add_pred(preds, predict_pm(mm_pop, reg_br$beta, reg_br$V, "mackay"), "pm_br_mk")
+    }
+    if (any(c("pm_br_pp", "pm_br_cpp") %in% settings$methods)) {
+      pm_samp_br <- predict_pm(mm_samp, reg_br$beta, reg_br$V)
+    }
+    if ("pm_br_pp" %in% settings$methods) {
+      reg_br_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_br, family = binom_fam))
+      preds <- add_pred(preds, pred_pop(reg_br_pp$coefficients), "pm_br_pp")
+    }
+    if ("pm_br_cpp" %in% settings$methods) {
+      cfs <- project_constrained_kl(pm_samp_br, mm_samp, sum(y_samp))
+      preds <- add_pred(preds, pred_pop(cfs), "pm_br_cpp")
+    }
+  }
+
+
+  # --- LASSO ---
+  if (any(c("pe_lasso_min", "pe_lasso_1se") %in% settings$methods)) {
+    mm_samp_noint <- mm_samp[, -1, drop = FALSE]
+    mm_pop_noint  <- mm_pop[, -1, drop = FALSE]
+
+    reg_s <- tryCatch(
+      cv.glmnet(mm_samp_noint, y_samp, family = "binomial", type.measure = "deviance"),
+      error = function(e) NULL
+    )
+    if (is.null(reg_s)) return(NULL)
+
+    if ("pe_lasso_min" %in% settings$methods) {
+      preds <- add_pred(preds, as.numeric(
+        predict(reg_s, newx = mm_pop_noint, s = "lambda.min", type = "response")
+      ), "pe_lasso_min")
+    }
+    if ("pe_lasso_1se" %in% settings$methods) {
+      preds <- add_pred(preds, as.numeric(
+        predict(reg_s, newx = mm_pop_noint, s = "lambda.1se", type = "response")
+      ), "pe_lasso_1se")
+    }
+  }
+
+  # --- Ridge ---
+  if (any(c("pe_ridge_min", "pe_ridge_1se") %in% settings$methods)) {
+    mm_samp_noint <- mm_samp[, -1, drop = FALSE]
+    mm_pop_noint  <- mm_pop[, -1, drop = FALSE]
+
+    reg_s <- tryCatch(
+      cv.glmnet(mm_samp_noint, y_samp, alpha = 0, family = "binomial", type.measure = "deviance"),
+      error = function(e) NULL
+    )
+    if (is.null(reg_s)) return(NULL)
+
+    if ("pe_ridge_min" %in% settings$methods) {
+      preds <- add_pred(preds, as.numeric(
+        predict(reg_s, newx = mm_pop_noint, s = "lambda.min", type = "response")
+      ), "pe_ridge_min")
+    }
+    if ("pe_ridge_1se" %in% settings$methods) {
+      preds <- add_pred(preds, as.numeric(
+        predict(reg_s, newx = mm_pop_noint, s = "lambda.1se", type = "response")
+      ), "pe_ridge_1se")
+    }
+  }
+
+  # --- Metrics ---
+  # All metrics evaluated against pi_true_pop (soft labels), not y_pop.
+  if (ncol(preds) == 0) return(NULL)
+
+  method_names <- colnames(preds)
+  n_methods <- length(method_names)
+  # Preallocate room for: standard metrics + NB threshold variants + per
+  # Bayesian family per replicate: cri_cov levels + 3 PIT-quantile scalars
+  # (pit_F_10, pit_F_50, pit_F_90).
+  n_cov_rows <- if (cri_wanted) length(posteriors) * length(settings$cri_cov) else 0L
+  n_pit_rows <- if (cri_wanted) length(posteriors) * 3L                         else 0L
+  iter_res <- vector("list",
+                     length(settings$metrics) + length(settings$z_quant) +
+                       n_cov_rows + n_pit_rows)
+  k <- 0L
+  
+   if ("dkl" %in% settings$metrics) {
+    k <- k + 1L
+    eps <- 1e-15
+    preds_c <- pmin(pmax(preds, eps), 1 - eps)
+    pi_c    <- pmin(pmax(pi_true_pop, eps), 1 - eps)
+  
+    # Broadcast: preds_c is n × n_methods, pi_c is length n.
+    # log2(pi_c / preds_c) gets pi_c recycled column-wise correctly when
+    # preds_c is a matrix.
+    log_term_1 <- log2(pi_c / preds_c)        # n × n_methods
+    log_term_0 <- log2((1 - pi_c) / (1 - preds_c))
+    kl_mat <- pi_c * log_term_1 + (1 - pi_c) * log_term_0
+    iter_res[[k]] <- data.frame(
+      metric = "dkl", method = method_names,
+      value  = colMeans(kl_mat)
+    )
+  }
+  
+  
+  # MSE
+  if ("mse" %in% settings$metrics) {
+    k <- k + 1L
+    iter_res[[k]] <- data.frame(
+      metric = "mse", method = method_names,
+      value = colMeans(pi_true_pop*(preds - 1)^2+(1-pi_true_pop)*(preds - 0)^2)
+    )
+  }
+
+  # Weighted c-statistic with soft labels
+  if ("cstat" %in% settings$metrics) {
+    k <- k + 1L
+    values <- numeric(n_methods)
+    for (j in seq_len(n_methods)) {
+      values[j] <- cstat_soft(preds[, j], pi_true_pop)
+    }
+    iter_res[[k]] <- data.frame(
+      metric = "cstat", method = method_names, value = values
+    )
+  }
+
+  # O/E ratio: observed (expected under true model) over expected (predicted)
+  if ("oe_ratio" %in% settings$metrics) {
+    k <- k + 1L
+    obs <- sum(pi_true_pop)
+    iter_res[[k]] <- data.frame(
+      metric = "oe_ratio", method = method_names,
+      value = obs / colSums(preds)
+    )
+  }
+
+  # Calibration intercept & slope: logistic recalibration with pi_true
+  # as the "outcome" on the response side.
+  #
+  # Failure handling: when predictions are near-constant on the logit
+  # scale (typical for heavily-shrunk LASSO/ridge at low EPV), glm.fit
+  # can fail to converge and return NA coefficients. We replace these
+  # with the null-model equivalents:
+  #   - cal_slp NA -> 0 (no information in predictions beyond intercept)
+  #   - cal_int NA -> logit(mean pi_true) - logit(mean pred)
+  #     (offset between mean true and mean predicted on logit scale)
+  want_cal_int <- "cal_int" %in% settings$metrics
+  want_cal_slp <- "cal_slp" %in% settings$metrics
+
+  if (want_cal_int || want_cal_slp) {
+    cal_int_vals <- numeric(n_methods)
+    cal_slp_vals <- numeric(n_methods)
+    mean_pi_true <- mean(pi_true_pop)
+
+    for (j in seq_len(n_methods)) {
+      logit_p <- qlogis(pmin(pmax(preds[, j], 1e-15), 1 - 1e-15))
+      fit_cal <- suppressWarnings(
+        glm.fit(cbind(1, logit_p), pi_true_pop, family = binom_fam)
+      )
+      ci <- fit_cal$coefficients[1]
+      cs <- fit_cal$coefficients[2]
+
+      # If the fit failed (non-convergence or NA coefficients), fall back
+      # to the null-model calibration values.
+      if (!isTRUE(fit_cal$converged) || is.na(cs) || is.na(ci)) {
+        cs <- 0
+        mean_pred <- mean(pmin(pmax(preds[, j], 1e-15), 1 - 1e-15))
+        ci <- qlogis(mean_pi_true) - qlogis(mean_pred)
+      }
+
+      cal_int_vals[j] <- ci
+      cal_slp_vals[j] <- cs
+    }
+
+    if (want_cal_int) {
+      k <- k + 1L
+      iter_res[[k]] <- data.frame(
+        metric = "cal_int", method = method_names, value = cal_int_vals
+      )
+    }
+    if (want_cal_slp) {
+      k <- k + 1L
+      iter_res[[k]] <- data.frame(
+        metric = "cal_slp", method = method_names, value = cal_slp_vals
+      )
+    }
+  }
+
+  # Net benefit with soft labels:
+  # NB(z) = mean over pop of { I(pi_hat > z) * [pi_true - (1 - pi_true) * z/(1-z)] }
+  #       - max(0, mean over pop of [pi_true - (1 - pi_true) * z/(1-z)])
+  # Standardised net benefit with soft labels. 
+  # prevalence; sNB = NB / prev, which puts results from different prevalences
+  # on a comparable scale (Riley convention). Per-replicate sNB is labelled
+  # snb<zm> (e.g., "snb0.5") so it can be pooled across scenarios.
+  if ("snb" %in% settings$metrics) {
+    scen_prev <- sim_parms$design_row$prevalence
+    for (zm in settings$z_quant) {
+      z <-  quantile(pi_true_pop, zm)# zm * scen_prev TODO
+      k <- k + 1L
+      snb_term <- pi_true_pop - (1 - pi_true_pop) * z / (1 - z)
+      snb0 <- max(0, mean(snb_term))
+      values <- numeric(n_methods)
+      for (j in seq_len(n_methods)) {
+        values[j] <- (mean((preds[, j] >= z) * snb_term) - snb0) / scen_prev
+      }
+      iter_res[[k]] <- data.frame(
+        metric = paste0("snb", zm), method = method_names, value = values
+      )
+    }
+  }
+
+  # --- Posterior-distribution calibration ---
+  # For each Bayesian family with a stashed posterior, compute:
+  #   (a) Coverage of the eta-scale credible interval at each cri_cov level.
+  #       Does the interval cover eta_pseudo_pop on average?
+  #   (b) Three PIT-quantile checks summarising whether the full posterior
+  #       distribution is calibrated (not just at the 95% interval). Per
+  #       individual, define u_i = Phi((eta_pseudo_i - mu_i) / sigma_i).
+  #       Under perfect calibration the u_i are uniformly distributed on
+  #       [0,1]. Three checks:
+  #         pit_F_10 : F_emp(0.10);  target = 0.10  (lower-tail mass)
+  #         pit_F_50 : F_emp(0.50);  target = 0.50  (median location)
+  #         pit_F_90 : F_emp(0.90);  target = 0.90  (upper-tail mass)
+  # The pattern across the three is interpretable: both 10% and 90% above
+  # target = posterior too narrow; both below target = too wide; both
+  # shifted in the same direction = location bias.
+  # All metrics are properties of the prior + Laplace approximation, not
+  # of any deployment computation. Method label is the family's PE key.
+  #
+  # Reference: the candidate's pseudo-true linear predictor (eta_pseudo_pop),
+  # computed once per scenario in generate_from_design(). When the candidate
+  # nests the truth (p_cand >= p_true), this equals the true eta. Under
+  # underspecification (p_cand < p_true), it is the KL projection target.
+  if (cri_wanted && length(posteriors) > 0) {
+    for (fam_key in names(posteriors)) {
+      post <- posteriors[[fam_key]]
+      mu_pop  <- as.numeric(mm_pop %*% post$mu)
+      var_pop <- rowSums(mm_pop * (mm_pop %*% post$V))
+      # Defensive: numerical noise can produce tiny negatives.
+      sd_pop  <- sqrt(pmax(var_pop, 0))
+
+      # (a) CrI coverage at each requested level.
+      for (lvl in settings$cri_cov) {
+        z   <- stats::qnorm(1 - (1 - lvl) / 2)
+        lo  <- mu_pop - z * sd_pop
+        hi  <- mu_pop + z * sd_pop
+        cov <- mean(eta_pseudo_pop >= lo & eta_pseudo_pop <= hi)
+        k <- k + 1L
+        iter_res[[k]] <- data.frame(
+          metric = sprintf("cri_cov_%d", round(100 * lvl)),
+          method = fam_key,
+          value  = cov
+        )
+      }
+
+      # (b) PIT-quantile checks. Defensive zero-sd guard: individuals with
+      # sd_pop = 0 (rare; only when X row is in the null space of V) are
+      # dropped from the PIT vector.
+      ok        <- sd_pop > 0
+      pit       <- pnorm((eta_pseudo_pop[ok] - mu_pop[ok]) / sd_pop[ok])
+      n_pit     <- length(pit)
+      if (n_pit > 0) {
+        pit_F_10 <- mean(pit <= 0.10)   # target 0.10
+        pit_F_50 <- mean(pit <= 0.50)   # target 0.50
+        pit_F_90 <- mean(pit <= 0.90)   # target 0.90
+      } else {
+        pit_F_10 <- pit_F_50 <- pit_F_90 <- NA_real_
+      }
+      k <- k + 1L
+      iter_res[[k]] <- data.frame(metric = "pit_F_10", method = fam_key, value = pit_F_10)
+      k <- k + 1L
+      iter_res[[k]] <- data.frame(metric = "pit_F_50", method = fam_key, value = pit_F_50)
+      k <- k + 1L
+      iter_res[[k]] <- data.frame(metric = "pit_F_90", method = fam_key, value = pit_F_90)
+    }
+  }
+
+  out <- do.call(rbind, iter_res[seq_len(k)])
+  r <- sim_parms$design_row
+  out$row_idx       <- i_row
+  out$scenario      <- r$scenario
+  out$iteration     <- r$iteration
+  out$true_p        <- r$true_p
+  out$candidate_p   <- r$candidate_p
+  out$prevalence    <- r$prevalence
+  out$epv           <- r$epv
+  out$n_sample      <- r$n_sample
+  out$n_binary      <- r$n_binary
+  out$correlation   <- r$correlation
+  out$realized_prev <- mean(y_samp)
+  out$n_events      <- sum(y_samp)
+
+  rownames(out) <- NULL
+  out
+}
+```
+
+
+
+
+```{R}
+# =========================================================================
+# Main execution
+# =========================================================================
+df_design <- generate_sim_design(settings)
+
+# --- Test mode: sample a few rows to verify pipeline ---
+test_mode <- FALSE
+n_test <- 10
+
+if (test_mode) {
+  test_rows <- sample(nrow(df_design), n_test)
+  df_design <- df_design[test_rows, ]
+  message(sprintf("TEST MODE: running %d random rows", n_test))
+}
+
+n_rows <- nrow(df_design)
+
+chunks <- split(seq_len(n_rows), ceiling(seq_len(n_rows) / settings$chunk_size))
+n_chunks <- length(chunks)
+
+no_cores <- if (is.null(settings$n_cores)) {
+  min(parallel::detectCores() - 1, n_chunks)
+} else {
+  settings$n_cores
+}
+
+if (no_cores > 1) {
+  cl <- makeCluster(no_cores)
+  registerDoSNOW(cl)
+  parallel::clusterExport(cl, varlist = c(
+    "df_design", "settings", "chunks",
+    "sim", "generate_from_design", "predict_pm"
+  ))
+  # Workers also need cstat_soft and any other helpers from core.R
+  parallel::clusterCall(cl, function() source("core.R"))
+  message(paste("Running in PARALLEL on", no_cores, "cores,", n_chunks, "chunks"))
+} else {
+  registerDoSEQ()
+  cl <- NULL
+  message(paste("Running SEQUENTIALLY,", n_chunks, "chunks"))
+}
+
+pb <- txtProgressBar(min = 0, max = n_chunks, style = 3)
+progress <- function(n) {setTxtProgressBar(pb, n); flush.console()}
+opts <- if (interactive()) list(progress = progress) else list()
+
+res <- foreach(
+  ch = seq_len(n_chunks),
+  .combine = "rbind",
+  .options.snow = opts,
+  .packages = c("glmnet", "pROC", "brglm2", "randtoolbox"),
+  .errorhandling = "pass"
+) %dorng% {
+  rows <- chunks[[ch]]
+  chunk_res <- vector("list", length(rows))
+  for (k in seq_along(rows)) {
+    chunk_res[[k]] <- tryCatch(
+      sim(rows[k]),
+      error = function(e) {
+        data.frame(
+          metric = NA, method = NA, value = NA,
+          row_idx = rows[k], error_msg = conditionMessage(e),
+          stringsAsFactors = FALSE
+        )
+      }
+    )
+  }
+  do.call(rbind, chunk_res)
+}
+
+close(pb)
+if (!is.null(cl)) stopCluster(cl)
+
+# --- Post-processing ---
+
+
+is_error <- is.na(res$metric)
+if (any(is_error)) {
+  errors <- res[is_error, ]
+  res <- res[!is_error, ]
+
+  n_failed <- length(unique(errors$row_idx))
+  message(sprintf("%d / %d rows failed (%.1f%%).", n_failed, n_rows, 100 * n_failed / n_rows))
+
+  failed_design <- df_design[unique(errors$row_idx), ]
+  cat("\nFailure breakdown:\n")
+  print(table(true_p = failed_design$true_p, candidate_p = failed_design$candidate_p, epv = failed_design$epv))
+
+  saveRDS(errors,
+          file = file.path(res_dir, paste0("sim_errors.rds")))
+} else {
+  message("All rows completed successfully.")
+}
+
+if ("error_msg" %in% names(res)) res$error_msg <- NULL
+res$metric <- as.factor(res$metric)
+res$method <- as.factor(res$method)
+
+# Count extreme calibration outliers by method (|value| > 3 on either
+# cal_int or cal_slp). These are typically driven by LASSO / ridge
+# collapsing to a near-constant prediction, which makes the recalibration
+# regression ill-conditioned. Raw values are preserved; plotting layer
+# winsorizes at ±3 for display.
+cal_outliers <- res %>%
+  dplyr::filter(as.character(metric) %in% c("cal_int", "cal_slp")) %>%
+  dplyr::mutate(is_outlier = abs(value) > 3) %>%
+  dplyr::group_by(method, metric) %>%
+  dplyr::summarise(
+    n_total   = dplyr::n(),
+    n_outlier = sum(is_outlier, na.rm = TRUE),
+    pct       = 100 * n_outlier / n_total,
+    .groups   = "drop"
+  ) %>%
+  dplyr::filter(n_outlier > 0) %>%
+  dplyr::arrange(dplyr::desc(pct))
+
+if (nrow(cal_outliers) > 0) {
+  cat("\nExtreme calibration values (|value| > 3):\n")
+  print(as.data.frame(cal_outliers), row.names = FALSE)
+} else {
+  message("No extreme calibration values detected.")
+}
+
+saveRDS(res, file = file.path(res_dir, "sim_synth_results.rds"))
+
+message(sprintf(
+  "Done. %d result rows from %d successful iterations. Saved to %s/sim_res.rds",
+  nrow(res), length(unique(res$row_idx)), res_dir
+))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Plots and tables
+
+```{r}
+
+res <- readRDS(paste0(res_dir, "sim_synth_results.rds"))
+
+df_pmpeeff <- data.frame(z=double(), epv=integer(), method=character(), nb=double())
+for(z_ in settings$z_quant){
+  for(method_ in c("pe","pm")){
+    for(epv_ in c(5,10)){
+      A <- mean((res |> filter(epv==epv_ & method %in% paste0(method_, c("_f","_j","_lf","_br")) & metric==paste0("snb",z_)) |> select(value))[[1]])
+      df_pmpeeff <- rbind(df_pmpeeff, data.frame(z=z_, epv=epv_, method=method_, nb=A))
+    }
+  }
+}
+
+nms <- apply(df_pmpeeff, 1, function(x){sprintf("%s|%s|%s", x['z'],x['epv'],x['method'])})
+rownames(df_pmpeeff) <- gsub(" ", "", nms)
+
+saveRDS(df_pmpeeff, file.path(res_dir,"synth_pmpeeff.rds"))
+# =========================================================================
+# Main-effects grid plots
+#   Rows = metrics, cols = factor levels, x = EPV
+#   Point + whiskers, no connecting lines, methods dodged horizontally
+#   Three separate figures, one per column-facet factor:
+#     Figure A: cols = true_p levels
+#     Figure B: cols = candidate_p levels
+#     Figure C: cols = prevalence levels
+#   Aggregation: mean (median for cal_slp and oe_ratio, which have
+#   heavy-tailed distributions) as the centrality estimate. Whiskers
+#   always show the IQR (Q25, Q75) across replicates — chosen over SD
+#   so that whiskers stay within the metric's natural range (e.g., MSE
+#   stays non-negative) and remain robust to outlier replicates.
+# =========================================================================
+
+
+# =========================================================================
+# Method registry — single source of truth for plotting.
+#
+# Each method gets one row. The four lookup vectors used by the plot
+# builders (method_labels, method_colors, method_shapes, default order)
+# are derived from this. Adding a new method to the plots = adding a row.
+#
+# Naming convention (documentation only; not enforced):
+#   <estimator>_<prior>[_<computation>]
+#     estimator : pe (PE / point estimate) or pm (PM / posterior mean)
+#     prior     : f (flat), j (Jeffreys/Firth), lf (log-F), br (Bayesian
+#                 ridge), ridge / lasso (CV-tuned)
+#     comp.     : omitted = quadrature (exact); mk = MacKay;
+#                 pp = self-projection; cpp = constrained (CITL-preserving)
+#                 self-projection; min / 1se for CV-tuned LASSO/ridge
+#
+# Non-quadrature PM rows (_mk / _pp / _cpp) are commented out by default
+# so the main plot stays uncluttered. They are still produced by sim()
+# and consumed by build_computation_plot(). Uncomment any row to also
+# include it in the main plot.
+# =========================================================================
+
+q_range <- c(0.25, 0.75)
+
+method_registry <- tibble::tribble(
+  ~key,            ~label,                                 ~color,     ~shape,
+  "pe_f",          "PE (flat)",                           "#1F4E79",  1,
+  "pm_f",          "PM (flat)",                           "#1F4E79",  16,
+  "pm_f_mk",       "PM (flat, MacKay)",                   "#1F4E79",  16,
+  "pm_f_pp",       "PM (flat, self-proj.)",               "#1F4E79",  16,
+  "pm_f_cpp",      "PM (flat, constr. self-proj.)",       "#1F4E79",  16,
+
+  "pe_j",          "PE (Jeffreys)",                       "#884553",  0,
+  "pm_j",          "PM (Jeffreys)",                       "#884553",  15,
+  "pm_j_mk",       "PM (Jeffreys, MacKay)",               "#884553",  15,
+  "pm_j_pp",       "PM (Jeffreys, self-proj.)",           "#884553",  15,
+  "pm_j_cpp",      "PM (Jeffreys, constr. self-proj.)",   "#884553",  15,
+
+  "pe_lf",         "PE (log-F)",                          "#009E73",  2,
+  "pm_lf",         "PM (logF)",                           "#009E73",  17,
+  "pm_lf_mk",      "PM (logF, MacKay)",                   "#009E73",  17,
+  "pm_lf_pp",      "PM (logF, self-proj.)",               "#009E73",  17,
+  "pm_lf_cpp",     "PM (logF, constr. self-proj.)",       "#009E73",  17,
+
+  "pe_br",         "PE (Bayes. ridge)",                       "#E07B00",  5,
+  "pm_br",         "PM (Bayes. ridge)",                       "#E07B00",  18,
+  "pm_br_mk",      "PM (Bayes. ridge, MacKay)",               "#E07B00",  18,
+  "pm_br_pp",      "PM (Bayes. ridge, self-proj.)",           "#E07B00",  18,
+  "pm_br_cpp",     "PM (Bayes. ridge, constr. self-proj.)",   "#E07B00",  18,
+
+  "pe_ridge_min",  "Ridge (CV-min)",                       "#AAAAAA",  2,
+  "pe_lasso_min",  "LASSO (CV-min)",                       "#AAAAAA",  6,
+)
+
+# ---- Derive lookup vectors ----
+method_labels <- setNames(method_registry$label, method_registry$key)
+method_colors <- setNames(method_registry$color, method_registry$key)
+method_shapes <- setNames(method_registry$shape, method_registry$key)
+default_method_order <- method_registry$key
+
+# all_metrics[grep("^snb", all_metrics)]
+# snb_quants <- sub("^snb", "", all_metrics[grepl("^snb", all_metrics)])
+
+metric_labels <- c(
+  dkl      = "KL divergence \n (bits)",
+  mse      = "MSE",
+  cstat    = "C-statistic",
+  cal_int  = "Calibration intercept",
+  cal_slp  = "Calibration slope",
+  oe_ratio = "O/E ratio",
+  snb0.25   = "sNB (z = 25th \n percentile of true risks)",
+  snb0.5    = "sNB (z = median of \n true risks)",
+  snb0.75   = "sNB (z = 75th \n percentile of true risk)"
+)
+
+# Metrics shown as rows (default). oe_ratio available but off by default;
+# add it by passing metric_order = c(..., "oe_ratio") to build_plot().
+default_metric_order <- c("dkl", "mse", "cstat", "oe_ratio", "cal_slp", "snb0.25", "snb0.5", "snb0.75")
+
+metric_reference <- list(
+  cal_int  = 0,
+  cal_slp  = 1,
+  oe_ratio = 1
+)
+
+# ---- Per-metric summary specification ----
+# For each metric, independently choose:
+#   - `center`: which centrality to display ("mean" or "median")
+#   - `range` : how to compute lower/upper whiskers ("sd" or "quant")
+# When range = "quant", the quantile pair comes from the global q_range
+# vector defined above (default: c(0.25, 0.75)).
+# To override for a particular plot, pass a modified list to the
+# `summary_spec` argument of build_plot()/build_marginal_plot()/etc.
+metric_summary_spec <- list(
+  dkl      = list(center = "median", range = "quant"), 
+  mse      = list(center = "mean",   range = "sd"),
+  cstat    = list(center = "mean",   range = "sd"),
+  cal_int  = list(center = "median",   range = "quant"),
+  cal_slp  = list(center = "median", range = "quant"),
+  oe_ratio = list(center = "median", range = "quant"),
+  snb0.25  = list(center = "mean",   range = "sd"),
+  snb0.5   = list(center = "mean",   range = "sd"),
+  snb0.75  = list(center = "mean",   range = "sd")
+)
+
+# ---- Centrality / whisker helpers ----
+# Each helper takes the per-metric data vector x and a single-string
+# spec, returning a scalar. compute_lower / compute_upper are split
+# (rather than one helper returning length-2) so that summarise() can
+# call them directly without list-unpacking.
+
+compute_center <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 1) return(NA_real_)
+  switch(spec,
+         mean   = mean(x),
+         median = median(x),
+         stop("Unknown centrality spec: ", spec))
+}
+
+compute_lower <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 2) return(NA_real_)
+  switch(spec,
+         sd    = mean(x) - sd(x),
+         quant = unname(quantile(x, q_range[1], na.rm = TRUE)),
+         stop("Unknown range spec: ", spec))
+}
+
+compute_upper <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 2) return(NA_real_)
+  switch(spec,
+         sd    = mean(x) + sd(x),
+         quant = unname(quantile(x, q_range[2], na.rm = TRUE)),
+         stop("Unknown range spec: ", spec))
+}
+
+# Resolve the metric's summary spec at aggregation time. `metric_key`
+# is the lowercase key (e.g., "mse"), not the display label. Returns
+# the list (center, range) for that metric, falling back to mean+quant
+# if the metric isn't in the spec.
+get_summary_spec <- function(metric_key, spec_table = metric_summary_spec) {
+  s <- spec_table[[metric_key]]
+  if (is.null(s)) return(list(center = "mean", range = "quant"))
+  s
+}
+
+# ---- Prepare data ----
+# Keep metric as character here; build_plot() subsets and levels it based
+# on the metric_order argument supplied at call time.
+res_plot <- res %>%
+  mutate(
+    method = as.character(method),
+    metric = as.character(metric)
+  ) %>%
+  mutate(metric = ifelse(metric %in% names(metric_labels),
+                         metric_labels[metric], metric))
+
+# ---- Plot builder ----
+# Each panel has its own y-axis (free in both directions): within-panel
+# method comparison is the only thing that matters. Point-and-whisker
+# display, dodged by method.
+# method_order: character vector of method keys in the order to display.
+#   Controls both legend order and dodge order. Unknown keys are dropped;
+#   data methods not in the order are appended at the end.
+build_plot <- function(data, col_factor, col_label_fn, figure_title,
+                       method_order  = default_method_order,
+                       metric_order  = default_metric_order,
+                       summary_spec  = metric_summary_spec) {
+
+  # Validate & finalise method ordering. Keep only methods that (a) are
+  # in the data, (b) are known to method_labels/colors/shapes, AND (c)
+  # are either point estimates or quadrature PMs. Non-quadrature PM
+  # variants (_mk / _pp / _cpp) are filtered out — they belong on the
+  # dedicated computation-comparison plot. This keeps the main figure
+  # focused on prior-family comparison.
+  is_main_plot_method <- function(k) {
+    parts <- strsplit(k, "_", fixed = TRUE)[[1]]
+    if (length(parts) < 1) return(FALSE)
+    if (parts[1] == "pe") return(TRUE)
+    if (parts[1] == "pm") return(length(parts) <= 2)
+    TRUE
+  }
+  avail <- unique(as.character(data$method))
+  known <- names(method_labels)
+  candidates <- intersect(avail, known)
+  candidates <- candidates[vapply(candidates, is_main_plot_method, logical(1))]
+  method_order <- method_order[method_order %in% candidates]
+  extra <- setdiff(candidates, method_order)
+  method_order <- c(method_order, extra)
+
+  data <- data %>%
+    filter(as.character(method) %in% method_order) %>%
+    mutate(method = factor(method, levels = method_order))
+
+  # Subset to requested metrics and re-level in requested order
+  data <- data %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = factor(as.character(metric),
+                           levels = metric_labels[metric_order]))
+
+  # Per-metric aggregation. The summary spec for each metric (centrality
+  # and range type) is looked up via metric_summary_spec; see helpers
+  # compute_center / compute_lower / compute_upper.
+  data$metric_key <- names(metric_labels)[match(as.character(data$metric),
+                                                metric_labels)]
+
+  agg <- data %>%
+    group_by(metric, metric_key, method, !!sym(col_factor), epv) %>%
+    summarise(
+      n_scen = sum(!is.na(value)),
+      center = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+      lo     = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi     = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(-metric_key) %>%
+    rename(mean = center)  # keep `mean` name so ggplot aes doesn't change
+
+  dodge_width <- 0.6
+
+  # Reference-line data frame, keyed by metric factor
+  ref_df <- data.frame(
+    metric_key = names(metric_reference),
+    yint       = unlist(metric_reference)
+  ) %>%
+    mutate(metric = factor(metric_labels[metric_key],
+                           levels = metric_labels[metric_order])) %>%
+    filter(!is.na(metric)) %>%
+    select(metric, yint)
+
+  p <- ggplot(agg, aes(x = factor(epv), y = mean,
+                       color = method, shape = method, group = method)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3,
+                  position = position_dodge(width = dodge_width),
+                  linewidth = 0.4) +
+    geom_point(size = 1.8,
+               position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(metric),
+      cols = vars(!!sym(col_factor)),
+      labeller = labeller(
+        metric = label_value,
+        .cols = col_label_fn
+      ),
+      scales = "free_y",
+      independent = "y"   # every panel gets its own y-scale
+    ) +
+    scale_color_manual(values = method_colors, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    scale_shape_manual(values = method_shapes, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = "Events per variable (EPV)",
+      y = NULL
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 9),
+      strip.text.y       = element_text(angle = 0, hjust = 0),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 9)
+    ) +
+    guides(color = guide_legend(nrow = 2, byrow = TRUE),
+           shape = guide_legend(nrow = 2, byrow = TRUE))
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(
+      data = ref_df,
+      aes(yintercept = yint),
+      linetype = "dashed", colour = "grey40", linewidth = 0.4,
+      inherit.aes = FALSE
+    )
+  }
+
+  p
+}
+
+# ---- Column label formatters ----
+label_true_p      <- function(x) paste0("True p = ", x)
+label_candidate_p <- function(x) paste0("Candidate p = ", x)
+label_prevalence  <- function(x) paste0("Prev = ",
+                                        scales::percent(as.numeric(as.character(x)),
+                                                        accuracy = 1))
+
+# ---- Build three figures ----
+plots <- list()
+
+plots$true_p <- build_plot(
+  res_plot, "true_p", label_true_p,
+  "Performance by size of true model"
+)
+
+plots$candidate_p <- build_plot(
+  res_plot, "candidate_p", label_candidate_p,
+  "Performance by size of candidate model"
+)
+
+plots$prevalence <- build_plot(
+  res_plot, "prevalence", label_prevalence,
+  "Performance by outcome prevalence"
+)
+
+# ---- Save (taller than wide for 7×3 grid) ----
+fig_width  <- 9
+fig_height <- 14
+
+ggsave(file.path(res_dir, "sim_synth_by_true_p.png"),
+       plots$true_p, width = fig_width, height = fig_height, dpi = 200)
+ggsave(file.path(res_dir, "sim_synth_by_candidate_p.png"),
+       plots$candidate_p, width = fig_width, height = fig_height, dpi = 200)
+ggsave(file.path(res_dir, "sim_synth_by_prevalence.png"),
+       plots$prevalence, width = fig_width, height = fig_height, dpi = 200)
+
+message("Saved 3 figures to ", res_dir, "/")
+
+# =========================================================================
+# Marginal-effects figure
+#   Rows = metrics, columns = the four main design factors (EPV, prev,
+#   true_p, candidate_p). Within each panel, each method is shown as
+#   point + whiskers at each level of the column's factor, marginalising
+#   over all other factors (including randomized correlation and n_binary).
+#   This complements the by-factor figures by presenting one-way marginals
+#   side-by-side rather than full two-way grids.
+# =========================================================================
+
+build_marginal_plot <- function(data, figure_title,
+                                 col_factors    = c("epv", "prevalence",
+                                                    "true_p", "candidate_p"),
+                                 col_titles     = c(epv         = "EPV",
+                                                    prevalence  = "Prevalence",
+                                                    true_p      = "True p",
+                                                    candidate_p = "Candidate p"),
+                                 method_order   = default_method_order,
+                                 metric_order   = default_metric_order,
+                                 summary_spec   = metric_summary_spec) {
+
+  # --- Data prep, same as build_plot ---
+  # Auto-filter: drop non-quadrature PM variants. They belong on the
+  # computation-comparison plot.
+  is_main_plot_method <- function(k) {
+    parts <- strsplit(k, "_", fixed = TRUE)[[1]]
+    if (length(parts) < 1) return(FALSE)
+    if (parts[1] == "pe") return(TRUE)
+    if (parts[1] == "pm") return(length(parts) <= 2)
+    TRUE
+  }
+  avail <- unique(as.character(data$method))
+  known <- names(method_labels)
+  candidates <- intersect(avail, known)
+  candidates <- candidates[vapply(candidates, is_main_plot_method, logical(1))]
+  method_order <- method_order[method_order %in% candidates]
+  extra <- setdiff(candidates, method_order)
+  method_order <- c(method_order, extra)
+  data <- data %>%
+    filter(as.character(method) %in% method_order) %>%
+    mutate(method = factor(method, levels = method_order))
+
+  data <- data %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = factor(as.character(metric),
+                           levels = metric_labels[metric_order]))
+
+  data$metric_key <- names(metric_labels)[match(as.character(data$metric),
+                                                metric_labels)]
+
+  # Per-factor aggregation. For each col_factor, group by (metric, method,
+  # that factor) and compute the appropriate center + whiskers via the
+  # per-metric summary spec. Stack across factors with a `col_factor`
+  # label so we can facet by it.
+  agg_one <- function(col_var) {
+    data %>%
+      group_by(metric, metric_key, method, !!sym(col_var)) %>%
+      summarise(
+        center = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+        lo     = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+        hi     = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+        .groups = "drop"
+      ) %>%
+      select(-metric_key) %>%
+      rename(x_level = !!sym(col_var)) %>%
+      mutate(col_factor = col_var)
+  }
+
+  agg <- bind_rows(lapply(col_factors, agg_one))
+
+  # Factor the col_factor column with pretty labels in the requested order
+  agg$col_factor <- factor(agg$col_factor,
+                           levels = col_factors,
+                           labels = unname(col_titles[col_factors]))
+
+  # x_level is treated as a factor within each column (different factors
+  # have different levels and display correctly if each col_factor has its
+  # own x scale; ggh4x independent x does exactly this).
+  agg$x_level <- factor(agg$x_level)
+
+  # Reference lines as before
+  ref_df <- data.frame(
+    metric_key = names(metric_reference),
+    yint       = unlist(metric_reference)
+  ) %>%
+    mutate(metric = factor(metric_labels[metric_key],
+                           levels = metric_labels[metric_order])) %>%
+    filter(!is.na(metric)) %>%
+    select(metric, yint)
+
+  dodge_width <- 0.8
+
+  p <- ggplot(agg, aes(x = x_level, y = center,
+                       color = method, shape = method, group = method)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3,
+                  position = position_dodge(width = dodge_width),
+                  linewidth = 0.4) +
+    geom_point(size = 1.5,
+               position = position_dodge(width = dodge_width)) +
+    facet_grid(
+      rows = vars(metric),
+      cols = vars(col_factor),
+      scales = "free",
+      switch = "x"  # 1. Moves the column (col_factor) labels to the bottom
+    ) +
+    scale_color_manual(values = method_colors, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    scale_shape_manual(values = method_shapes, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = NULL,
+      y = NULL
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 9),
+      strip.text.y       = element_text(angle = 0, hjust = 0),
+      strip.placement    = "outside", # 2. Places bottom labels cleanly beneath the X-axis text
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 9)
+    ) +
+    guides(color = guide_legend(nrow = 2, byrow = TRUE),
+           shape = guide_legend(nrow = 2, byrow = TRUE))
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(
+      data = ref_df,
+      aes(yintercept = yint),
+      linetype = "dashed", colour = "grey40", linewidth = 0.4,
+      inherit.aes = FALSE
+    )
+  }
+
+  p
+}
+
+plots$marginal <- build_marginal_plot(
+  res_plot,
+  NULL
+)
+
+ggsave(file.path(res_dir, "sim_synth_main.png"),
+       plots$marginal, width = 12, height = 14, dpi = 200)
+
+message("Saved marginal figure to ", res_dir, "/sim_synth_main.png")
+
+invisible(plots)
+
+
+
+
+
+# =========================================================================
+# PM computation-method comparison plot
+#
+# Holds the prior fixed within each column (Flat / Jeffreys / log-F /
+# Bayesian ridge) and varies the PM computation method (quadrature /
+# MacKay / self-projection / CITL-preserving self-projection) within
+# each panel. Aggregates across design factors (true_p, candidate_p,
+# prevalence): the message of this plot is "computation choice barely
+# matters relative to prior choice", and that's clearest when not
+# stratified by design factor. Y-axis is matched to the main plots'
+# per-metric range.
+#
+# Structurally analogous to GUSTO's gusto_pm_comp.png:
+#   rows = metrics, cols = prior family, x = EPV, dodged by computation.
+# =========================================================================
+
+computation_labels <- c(
+  exact = "Quadrature (exact)",
+  mk    = "MacKay",
+  pp    = "Self-projection",
+  cpp   = "CITL-preserving proj."
+)
+computation_colors <- c(
+  exact = "#1F4E79",
+  mk    = "#2E75B6",
+  pp    = "#E07B00",
+  cpp   = "#B22222"
+)
+computation_shapes <- c(
+  exact = 16,
+  mk    = 17,
+  pp    = 15,
+  cpp   = 18
+)
+computation_order <- c("exact", "mk", "pp") #, "cpp")
+
+family_labels <- c(
+  f  = "Flat prior",
+  j  = "Jeffreys (Firth)",
+  lf = "log-F(2, 2)",
+  br = "Gaussian (Bayes. ridge)"
+)
+family_order <- c("f", "j", "lf", "br")
+
+parse_pm_method <- function(key) {
+  parts <- strsplit(key, "_", fixed = TRUE)[[1]]
+  if (length(parts) < 2 || parts[1] != "pm") {
+    return(c(family = NA_character_, computation = NA_character_))
+  }
+  fam  <- parts[2]
+  comp <- if (length(parts) == 2) "exact" else parts[3]
+  c(family = fam, computation = comp)
+}
+
+# ---- Capture per-metric y-limits from the main plots' aggregation ----
+# Replicates the central+whisker computation of build_plot but extracts
+# per-metric (ymin, ymax) across all methods and EPV values, aggregated
+# across the design factor. The comp plot will use these to anchor each
+# row's y-range so the visual scale matches the main plots.
+get_main_plot_ylims <- function(data,
+                                method_order  = default_method_order,
+                                metric_order  = default_metric_order,
+                                summary_spec  = metric_summary_spec) {
+  is_main <- function(k) {
+    parts <- strsplit(k, "_", fixed = TRUE)[[1]]
+    if (length(parts) < 1) return(FALSE)
+    if (parts[1] == "pe") return(TRUE)
+    if (parts[1] == "pm") return(length(parts) <= 2)
+    TRUE
+  }
+  avail <- unique(as.character(data$method))
+  known <- names(method_labels)
+  candidates <- intersect(avail, known)
+  candidates <- candidates[vapply(candidates, is_main, logical(1))]
+
+  data <- data %>%
+    filter(as.character(method) %in% candidates) %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = as.character(metric))
+
+  data$metric_key <- names(metric_labels)[match(data$metric, metric_labels)]
+
+  # Aggregate by (metric, method, epv) — same grouping as build_plot but
+  # without the design-factor column, so per-metric limits average over
+  # all design configurations and all main-plot methods.
+  agg <- data %>%
+    group_by(metric, metric_key, method, epv) %>%
+    summarise(
+      lo = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(-metric_key)
+
+  agg %>%
+    group_by(metric) %>%
+    summarise(ymin = min(lo, na.rm = TRUE),
+              ymax = max(hi, na.rm = TRUE),
+              .groups = "drop")
+}
+
+
+
+
+build_computation_plot <- function(data, figure_title = NULL,
+                                   metric_order  = default_metric_order,
+                                   summary_spec  = metric_summary_spec,
+                                   y_limits      = NULL) {
+
+  pm_keys <- unique(as.character(data$method))
+  pm_keys <- pm_keys[grepl("^pm_", pm_keys)]
+  parsed  <- t(sapply(pm_keys, parse_pm_method))
+  valid   <- !is.na(parsed[, "family"]) &
+             parsed[, "family"]      %in% family_order &
+             parsed[, "computation"] %in% computation_order
+  pm_keys <- pm_keys[valid]
+  parsed  <- parsed[valid, , drop = FALSE]
+
+  if (length(pm_keys) == 0) {
+    warning("No PM methods found for computation-comparison plot")
+    return(NULL)
+  }
+
+  key_to_family <- setNames(parsed[, "family"], pm_keys)
+  key_to_comp   <- setNames(parsed[, "computation"], pm_keys)
+
+  data <- data %>%
+    filter(as.character(method) %in% pm_keys) %>%
+    mutate(
+      method      = as.character(method),
+      family      = factor(unname(key_to_family[method]), levels = family_order),
+      computation = factor(unname(key_to_comp[method]),   levels = computation_order)
+    )
+
+  data <- data %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = factor(as.character(metric),
+                           levels = metric_labels[metric_order]))
+
+  data$metric_key <- names(metric_labels)[match(as.character(data$metric),
+                                                metric_labels)]
+
+  # Aggregate over design factors (true_p, candidate_p, prevalence) —
+  # group only by (metric, family, computation, epv).
+  agg <- data %>%
+    group_by(metric, metric_key, family, computation, epv) %>%
+    summarise(
+      n_scen = sum(!is.na(value)),
+      center = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+      lo     = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi     = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(-metric_key)
+
+  ref_df <- data.frame(
+    metric_key = names(metric_reference),
+    yint       = unlist(metric_reference)
+  ) %>%
+    mutate(metric = factor(metric_labels[metric_key],
+                           levels = metric_labels[metric_order])) %>%
+    filter(!is.na(metric)) %>%
+    select(metric, yint)
+
+  # ---- Anchor points to force per-row y-limits to match main plots ----
+  agg_anchors <- NULL
+  if (!is.null(y_limits)) {
+    families_present <- levels(droplevels(agg$family))
+    epvs_present     <- unique(agg$epv)
+    base_grid <- expand.grid(
+      metric = unique(agg$metric),
+      family = families_present,
+      epv    = epvs_present,
+      stringsAsFactors = FALSE
+    )
+    base_grid <- base_grid %>%
+      left_join(y_limits, by = "metric") %>%
+      filter(!is.na(ymin), !is.na(ymax))
+    agg_anchors <- bind_rows(
+      base_grid %>% mutate(center = ymin),
+      base_grid %>% mutate(center = ymax)
+    ) %>%
+      mutate(
+        lo          = center,
+        hi          = center,
+        computation = factor(computation_order[1], levels = computation_order),
+        family      = factor(family, levels = family_order),
+        metric      = factor(metric, levels = metric_labels[metric_order])
+      ) %>%
+      select(metric, family, computation, epv, center, lo, hi)
+  }
+
+  family_labeller <- function(x) family_labels[as.character(x)]
+  dodge_width <- 0.6
+
+  p <- ggplot(agg, aes(x = factor(epv), y = center,
+                       color = computation, shape = computation,
+                       group = computation)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3,
+                  position = position_dodge(width = dodge_width),
+                  linewidth = 0.4) +
+    geom_point(size = 1.8,
+               position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(metric),
+      cols = vars(family),
+      labeller = labeller(family = family_labeller),
+      scales = "free_y",
+      switch = "x"  # 1. Moves the column (family) labels to the bottom
+    ) +
+    scale_color_manual(values = computation_colors,
+                       labels = computation_labels[computation_order],
+                       breaks = computation_order,
+                       drop = FALSE, name = "Computation") +
+    scale_shape_manual(values = computation_shapes,
+                       labels = computation_labels[computation_order],
+                       breaks = computation_order,
+                       drop = FALSE, name = "Computation") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = "Events per variable (EPV)",
+      y = NULL
+    ) +
+    theme_bw(base_size = 9) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 8),
+      strip.text.y       = element_text(angle = 0, hjust = 0),
+      strip.placement    = "outside", # 2. Places bottom labels cleanly beneath the X-axis numbers
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 8)
+    ) +
+    guides(color = guide_legend(nrow = 1),
+           shape = guide_legend(nrow = 1))
+
+  if (!is.null(agg_anchors)) {
+    p <- p + geom_blank(data = agg_anchors, aes(y = center))
+  }
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(
+      data = ref_df,
+      aes(yintercept = yint),
+      linetype = "dashed", colour = "grey40", linewidth = 0.4,
+      inherit.aes = FALSE
+    )
+  }
+
+  p
+}
+
+build_computation_plot_rel <- function(data, figure_title = NULL,
+                                   metric_order  = default_metric_order,
+                                   summary_spec  = metric_summary_spec,
+                                   y_limits      = NULL) {
+
+  pm_keys <- unique(as.character(data$method))
+  pm_keys <- pm_keys[grepl("^pm_", pm_keys)]
+  parsed  <- t(sapply(pm_keys, parse_pm_method))
+  valid   <- !is.na(parsed[, "family"]) &
+             parsed[, "family"]      %in% family_order &
+             parsed[, "computation"] %in% computation_order
+  pm_keys <- pm_keys[valid]
+  parsed  <- parsed[valid, , drop = FALSE]
+
+  if (length(pm_keys) == 0) {
+    warning("No PM methods found for computation-comparison plot")
+    return(NULL)
+  }
+
+  key_to_family <- setNames(parsed[, "family"], pm_keys)
+  key_to_comp   <- setNames(parsed[, "computation"], pm_keys)
+
+  # 1. Initial Prep
+  data_prepared <- data %>%
+    filter(as.character(method) %in% pm_keys) %>%
+    mutate(
+      method      = as.character(method),
+      family      = factor(unname(key_to_family[method]), levels = family_order),
+      computation = factor(unname(key_to_comp[method]),   levels = computation_order),
+      metric_key  = names(metric_labels)[match(as.character(metric), metric_labels)]
+    ) %>%
+    filter(metric_key %in% metric_order) %>%
+    mutate(metric = factor(as.character(metric), levels = metric_labels[metric_order]))
+
+  # 2. Extract Exact values per replicate paired by iteration (and scenario factors)
+  # In this sim, unique scenarios are defined by epv, true_p, candidate_p, and prevalence
+  exact_vals <- data_prepared %>%
+    filter(computation == "exact") %>%
+    select(metric, family, epv, true_p, candidate_p, prevalence, iteration, exact_value = value)
+
+  # 3. Calculate SD of paired differences and absolute centers
+  agg <- data_prepared %>%
+    left_join(exact_vals, by = c("metric", "family", "epv", "true_p", "candidate_p", "prevalence", "iteration")) %>%
+    mutate(diff = value - exact_value) %>%
+    group_by(metric, metric_key, family, computation, epv) %>%
+    summarise(
+      center  = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+      diff_sd = sd(diff, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # Whiskers show SD of paired difference, centered on the method's own absolute mean
+      # We skip whiskers for the 'exact' method itself as it is the reference
+      lo = ifelse(computation == "exact", NA, center - diff_sd),
+      hi = ifelse(computation == "exact", NA, center + diff_sd)
+    )
+
+  # 4. Anchor points to force per-row y-limits to match main plots
+  agg_anchors <- NULL
+  if (!is.null(y_limits)) {
+    families_present <- levels(droplevels(agg$family))
+    epvs_present     <- unique(agg$epv)
+    base_grid <- expand.grid(
+      metric = unique(agg$metric),
+      family = families_present,
+      epv    = epvs_present,
+      stringsAsFactors = FALSE
+    ) %>%
+      left_join(y_limits, by = "metric")
+    
+    agg_anchors <- bind_rows(
+      base_grid %>% mutate(center = ymin),
+      base_grid %>% mutate(center = ymax)
+    ) %>%
+      mutate(
+        lo = center, hi = center,
+        computation = factor(computation_order[1], levels = computation_order),
+        family      = factor(family, levels = family_order),
+        metric      = factor(metric, levels = levels(agg$metric))
+      )
+  }
+
+  # 5. Plotting
+  family_labeller <- function(x) family_labels[as.character(x)]
+  dodge_width <- 0.6
+
+  p <- ggplot(agg, aes(x = factor(epv), y = center, color = computation, shape = computation, group = computation)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3, position = position_dodge(width = dodge_width), linewidth = 0.4) +
+    geom_point(size = 1.8, position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(metric), cols = vars(family),
+      labeller = labeller(family = family_labeller),
+      scales = "free_y"
+    ) +
+    scale_color_manual(values = computation_colors, labels = computation_labels, name = "Computation") +
+    scale_shape_manual(values = computation_shapes, labels = computation_labels, name = "Computation") +
+    labs(x = "Events per variable (EPV)", y = NULL) +
+    theme_bw(base_size = 9) +
+    theme(
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "grey92", colour = NA),
+      strip.text.y = element_text(angle = 0, hjust = 0),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+
+  if (!is.null(agg_anchors)) {
+    p <- p + geom_blank(data = agg_anchors, aes(y = center))
+  }
+
+  # Reference lines for absolute values
+  ref_df <- data.frame(metric_key = names(metric_reference), yint = unlist(metric_reference)) %>%
+    mutate(metric = factor(metric_labels[metric_key], levels = levels(agg$metric))) %>%
+    filter(!is.na(metric))
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(data = ref_df, aes(yintercept = yint), 
+                        linetype = "dashed", colour = "grey40", linewidth = 0.4)
+  }
+
+  p
+}
+
+# ---- Build the comp plot ----
+main_ylims <- get_main_plot_ylims(res_plot)
+# Main-plot metric column uses labels (not keys) after res_plot prep, so
+# translate keys to labels for matching.
+main_ylims <- main_ylims %>%
+  mutate(metric = unname(metric_labels[metric]))
+
+plots$pm_comp <- build_computation_plot(
+  res_plot,
+  NULL,
+  y_limits = main_ylims
+)
+
+ggsave(file.path(res_dir, "sim_synth_pm.png"),
+       plots$pm_comp, width = 12, height = 14, dpi = 200)
+
+
+
+# =========================================================================
+# CrI coverage plot — credible-interval coverage stratified by specification
+# regime, intended for the appendix.
+#
+# Posterior calibration is summarised more comprehensively in the main-text
+# table (CrI coverage + PIT-based metrics, marginalised over regime). This
+# plot retains the regime stratification for readers who want the
+# regime-specific story.
+#
+# Only the four Bayesian PE keys (pe_f / pe_j / pe_lf / pe_br) appear;
+# CV-tuned LASSO/ridge are excluded (no Laplace posterior).
+# =========================================================================
+
+coverage_methods <- c("pe_f", "pe_j", "pe_lf", "pe_br")
+coverage_colors  <- method_colors[coverage_methods]
+coverage_shapes  <- method_shapes[coverage_methods]
+coverage_labels  <- c(pe_f  = "Flat",
+                      pe_j  = "Jeffreys",
+                      pe_lf = "log-F",
+                      pe_br = "Gaussian (Bayes. ridge)")
+
+
+build_coverage_plot <- function(data,
+                                col_factors    = c("true_p", "candidate_p",
+                                                   "prevalence", "epv"),
+                                col_factor_lbl = c(true_p      = "True predictors",
+                                                   candidate_p = "Candidate predictors",
+                                                   prevalence  = "Prevalence",
+                                                   epv         = "EPV"),
+                                figure_title   = NULL) {
+
+  data <- data %>%
+    filter(as.character(method) %in% coverage_methods,
+           grepl("^cri_cov_", as.character(metric))) %>%
+    mutate(method = factor(as.character(method), levels = coverage_methods),
+           metric = as.character(metric))
+
+  if (nrow(data) == 0) {
+    warning("build_coverage_plot: no cri_cov_* rows found; check that ",
+            "settings$cri_cov was non-empty when the simulation ran.")
+    return(NULL)
+  }
+
+  data <- data %>%
+    mutate(spec_regime = factor(
+      dplyr::case_when(
+        candidate_p <  true_p ~ "Underspecified",
+        candidate_p == true_p ~ "Correctly specified",
+        candidate_p >  true_p ~ "Overspecified"
+      ),
+      levels = c("Underspecified", "Correctly specified", "Overspecified")
+    ))
+
+  # Coverage level (target value) parsed from the metric name.
+  data$cov_level <- as.numeric(sub("^cri_cov_", "", data$metric)) / 100
+
+  # Per-design-factor aggregation. spec_regime kept in the grouping so
+  # the three regimes remain separated regardless of which col_factor we
+  # collapse over.
+  agg_one <- function(col_var) {
+    data %>%
+      group_by(cov_level, spec_regime, method, !!sym(col_var)) %>%
+      summarise(
+        n_sim  = sum(!is.na(value)),
+        center = mean(value, na.rm = TRUE),
+        lo     = quantile(value, q_range[1], na.rm = TRUE, names = FALSE),
+        hi     = quantile(value, q_range[2], na.rm = TRUE, names = FALSE),
+        .groups = "drop"
+      ) %>%
+      rename(x_value_raw = !!sym(col_var)) %>%
+      mutate(col_factor = col_var,
+             x_value    = factor(as.character(x_value_raw),
+                                 levels = as.character(sort(unique(x_value_raw))))) %>%
+      select(-x_value_raw)
+  }
+  agg <- bind_rows(lapply(col_factors, agg_one))
+
+  # Numeric x-axis sort across all design factors.
+  agg$x_value <- factor(
+    as.character(agg$x_value),
+    levels = unique(as.character(agg$x_value))[
+      order(suppressWarnings(as.numeric(unique(as.character(agg$x_value)))))
+    ]
+  )
+  agg$col_factor <- factor(agg$col_factor,
+                           levels = col_factors,
+                           labels = unname(col_factor_lbl[col_factors]))
+
+  # Reference line at the nominal coverage level (typically 0.95).
+  ref_df <- data %>% distinct(cov_level) %>% rename(yint = cov_level)
+
+  dodge_width <- 0.6
+
+  ggplot(agg, aes(x = x_value, y = center,
+                  color = method, shape = method, group = method)) +
+    geom_hline(data = ref_df, aes(yintercept = yint),
+               linetype = "dashed", colour = "grey40", linewidth = 0.4,
+               inherit.aes = FALSE) +
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.3,
+                  position = position_dodge(width = dodge_width), linewidth = 0.4) +
+    geom_point(size = 2, position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(spec_regime),
+      cols = vars(col_factor),
+      scales = "free"
+      # `scales = "free"` (no `independent`) gives row-shared y-scale and
+      # column-shared x-scale: y-ticks only in leftmost column, x-ticks
+      # only in bottom row. Same convention as build_marginal_plot.
+    ) +
+    scale_color_manual(values = coverage_colors, labels = coverage_labels,
+                       breaks = coverage_methods, drop = FALSE, name = "Prior") +
+    scale_shape_manual(values = coverage_shapes, labels = coverage_labels,
+                       breaks = coverage_methods, drop = FALSE, name = "Prior") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = NULL,
+      y = "Empirical coverage"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 9),
+      strip.text.y       = element_text(angle = 0, hjust = 0, size = 8),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 9)
+    ) +
+    guides(color = guide_legend(nrow = 1, byrow = TRUE),
+           shape = guide_legend(nrow = 1, byrow = TRUE))
+}
+
+
+# ---- Appendix figure: coverage stratified by specification regime ----
+plots$coverage_by_regime <- build_coverage_plot(
+  res_plot,
+  figure_title = "CrI coverage by prior family and specification regime"
+)
+ggsave(file.path(res_dir, "sim_synth_coverage_by_regime.png"),
+       plots$coverage_by_regime, width = 12, height = 8, dpi = 200)
+
+
+# =========================================================================
+# Posterior calibration table — main-text summary.
+#
+# 12 rows (4 priors x 3 EPV levels) x 4 metric columns:
+#   - CrI coverage (target = 0.95)
+#   - F_emp(0.10)  (target = 0.10)
+#   - F_emp(0.50)  (target = 0.50)
+#   - F_emp(0.90)  (target = 0.90)
+# Saved as RDS in a tidy long format with raw mean and SD across
+# replicates per (prior, EPV, metric) cell. The manuscript Rmd can
+# pivot/format/style this however it likes (e.g., kable + kableExtra).
+# Marginalised over specification regime, prevalence, true_p, and
+# candidate_p — the regime story is in the appendix coverage figure.
+# =========================================================================
+
+posterior_table <- res_plot %>%
+  filter(as.character(method) %in% coverage_methods,
+         as.character(metric) %in% c("cri_cov_95", "pit_F_10", "pit_F_50", "pit_F_90")) %>%
+  mutate(method = factor(as.character(method),
+                         levels = coverage_methods,
+                         labels = unname(coverage_labels[coverage_methods])),
+         metric = factor(as.character(metric),
+                         levels = c("cri_cov_95", "pit_F_10", "pit_F_50", "pit_F_90"),
+                         labels = c("Coverage 95%", "PIT F(0.10)",
+                                    "PIT F(0.50)", "PIT F(0.90)"))) %>%
+  group_by(method, epv, metric) %>%
+  summarise(mean_val = mean(value, na.rm = TRUE),
+            sd_val   = sd(value,   na.rm = TRUE), #/sqrt(sum(!is.na(value))),
+            n_rep    = sum(!is.na(value)),
+            .groups  = "drop") %>%
+  arrange(method, epv, metric) %>%
+  rename(prior = method, EPV = epv)
+
+saveRDS(posterior_table,
+        file = file.path(res_dir, "sim_synth_posterior_table.rds"))
+
+message("Saved coverage figure and posterior-calibration table to ", res_dir, "/")
+
+kable(posterior_table)
+```

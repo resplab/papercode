@@ -1,0 +1,1385 @@
+---
+title: Expectation over the posterior distribution of predicted risks provides partial protection agaisnt overfitting
+author: "Mohsen Sadatsafavi"
+date: "2026.05.16"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(tidyverse)
+library(broom)
+library(ggrepel)
+library(brglm2)
+library(brms)
+library(glmnet)
+library(mcmapper)
+library(parallel)
+library(foreach)
+library(doSNOW)
+library(doRNG)
+library(WeightedROC)
+library(pROC)
+library(predtools)
+library(tableone)
+library(ggh4x)   # facet_grid2 with independent y-scales
+library(nloptr)
+
+source("core.R")
+
+res_dir <- "M:/Projects/2026/Project.BayesCPM/results/wip/"
+
+format_glm_equation <- function(fit, digits = 3, proper_names=NULL) {
+  b <- coef(fit)
+  terms <- names(b)
+  parts <- character(length(b))
+  for (i in seq_along(b)) {
+    if(!is.null(proper_names)) {
+      terms[i]<-proper_names[i]
+    }
+    val <- round(b[i], digits)
+    if (terms[i] == "(Intercept)") {
+      parts[i] <- format(val, nsmall = digits)
+    } else {
+      sign <- if (val >= 0) " + " else " - "
+      parts[i] <- paste0(sign, format(abs(val), nsmall=digits), ifelse(nchar(terms[i])>0, paste0("[", terms[i], "]"),""))
+    }
+  }
+  paste0(parts, collapse = "")
+}
+
+```
+
+
+
+
+
+```{r}
+
+seed <- 123
+
+settings <- list(
+  n_populations = 16,
+
+  fm_model  = Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7,
+
+  n_sim = 2500,
+
+  ns = c(500, 1000, 5000),
+
+  # log-F(m, m) prior strength for slopes (intercept stays flat).
+  # m = 2 is weakly informative per Greenland & Mansournia 2015.
+  logf_m = 2,
+
+  methods = c('pe_f', 
+              'pm_f', 'pm_f_mk', 'pm_f_pp', '_pm_f_cpp',
+              'pe_j',  'pm_j', 'pm_j_mk', 'pm_j_pp', '_pm_j_cpp', 
+              'pe_lf', 'pm_lf', 'pm_lf_mk', 'pm_lf_pp',  '_pm_lf_cpp',
+              'pe_br', 'pm_br', 'pm_br_mk', 'pm_br_pp', '_pm_br_cpp',
+              'pe_lasso_min', 'pe_ridge_min'),
+
+  metrics = c('mse', 'cstat', 'oe_ratio', 'cal_slp', 'nb'),
+
+  Doe = c("(intercept)"=1, 61, 0, 0, 0, 1, 100, 83),
+  
+  var_specs = data.frame(
+  key  = c("X1",          "X2",                     "X3",                       "X4",                  "X5",            "X6",                                "X7",                     "Y"),
+  name = c("Age (years)", "MI location: other (%)", "MI location: anterior (%)", "Previous MI (%)",     "Killip class",  "Systolic BP, capped at 100 (mmHg)", "Pulse rate (beats/min)", "30-day mortality (%)"),
+  short_name = c("Age", "MI location - other", "MI location - anterior", "Previous MI", "Killip class", "Systolic BP", "Pulse", "Response"),
+  type = c("continuous",  "binary",                  "binary",                   "binary",              "levels",        "continuous",                        "continuous",             "binary"),
+  stringsAsFactors = FALSE
+),
+
+  z = c(0.02, 0.05, 0.10)
+)
+
+# Disabling convention: methods whose names begin with "_" are skipped.
+# Filter here so no downstream code has to be underscore-aware.
+settings$methods <- settings$methods[!startsWith(settings$methods, "_")]
+
+gusto_collector <- list()
+
+saveRDS(settings,  file = paste0(res_dir, "gusto_settings.rds"))
+
+```
+
+
+
+
+
+
+## Data wrangling
+
+```{r tab-desc-data, echo = FALSE, include = FALSE}
+set.seed(seed)
+data(gusto)
+df  <- gusto
+
+# Build predictor variables
+df$Y  <- gusto$day30
+df$X0 <- (df$sex == "female") * 1
+df$X1 <- df$age
+df$X2 <- (df$miloc == "Other") * 1
+df$X3 <- (df$miloc == "Anterior") * 1
+df$X4 <- (df$pmi == "yes") * 1
+df$X5 <- as.numeric(df$Killip) - 1
+df$X6 <- pmin(df$sysbp, 100)
+df$X7 <- df$pulse
+df$population <- df$regl
+df <- df[order(df$regl), c("X1", "X2", "X3", "X4", "X5", "X6", "X7", "Y", "population")]
+df$intercept <- 1
+df_final  <- df
+df_sample <- df_final[sample(nrow(df_final), settings$ns[2]), ]
+
+
+
+# Per-variable summary line builders.
+fmt_continuous <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x,   na.rm = TRUE)
+  sprintf("%.1f (%.1f)", m, s)
+}
+fmt_binary <- function(x) {
+  n_yes <- sum(x == 1, na.rm = TRUE)
+  n_tot <- sum(!is.na(x))
+  sprintf("%d (%.1f)", n_yes, 100 * n_yes / n_tot)
+}
+fmt_ordinal <- function(x) {
+  med <- median(x, na.rm = TRUE)
+  q1  <- quantile(x, 0.25, na.rm = TRUE, names = FALSE)
+  q3  <- quantile(x, 0.75, na.rm = TRUE, names = FALSE)
+  sprintf("%g (%g, %g)", med, q1, q3)
+}
+fmt_levels <- function(x, level_labels = NULL) {
+  tab <- table(x)
+  total <- sum(tab)
+  lvl_names <- if (is.null(level_labels)) names(tab) else level_labels[names(tab)]
+  paste(
+    sprintf("%s: %d (%.1f%%)", lvl_names, tab, 100 * tab / total),
+    collapse = "; "
+  )
+}
+
+# Build one row per variable.
+desc_rows <- vapply(seq_len(nrow(settings$var_specs)), function(i) {
+  v <- df_sample[[settings$var_specs$key[i]]]
+  switch(settings$var_specs$type[i],
+         continuous = fmt_continuous(v),
+         binary     = fmt_binary(v),
+         ordinal    = fmt_ordinal(v),
+         levels     = fmt_levels(v, level_labels = c("0" = "I", "1" = "II",
+                                                     "2" = "III", "3" = "IV")))
+}, character(1))
+
+desc_df <- data.frame(
+  Variable = settings$var_specs$name,
+  Summary  = desc_rows,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+# Save for manuscript-side rendering.
+saveRDS(list(
+  desc_df    = desc_df,
+  n_total    = nrow(df_sample),
+  n_events   = sum(df_sample$Y == 1, na.rm = TRUE),
+  prevalence = mean(df_sample$Y, na.rm = TRUE)
+), file = paste0(res_dir, "table_gusto_desc.rds"))
+
+gusto_collector$gusto$n_dev <- nrow(df_sample)
+gusto_collector$gusto$n_total <- nrow(df_final)
+gusto_collector$gusto$prev_dev <- mean(df_sample$Y)
+gusto_collector$gusto$prev_total <- mean(df_final$Y)
+
+kable(desc_df)
+```
+
+
+
+
+
+## Make models, their predictions and add them to df_sample and Doe
+```{R}
+set.seed(seed)
+
+X <- model.matrix(settings$fm_model, df_sample)
+
+# ---- Flat prior ----
+reg_f <- glm(settings$fm_model, data = df_sample, family = binomial())
+gusto_collector$models$reg_f$eq <- format_glm_equation(reg_f, proper_names=c("", settings$var_specs$short_name))
+gusto_collector$models$reg_f$coefs <- summary(reg_f)$coefficients[,1:2]
+tmp <- predict(reg_f, se.fit = TRUE)
+df_sample$pred_pe_f <- plogis(tmp$fit)
+df_sample$pred_pm_f <- predict_pm(X, coef(reg_f), vcov(reg_f))
+
+
+gusto_collector$Doe$pred_f$pe <- plogis(coef(reg_f) %*% settings$Doe)
+tmp <- predict_pm(t(settings$Doe), coef(reg_f), vcov(reg_f), return_sd = T)
+gusto_collector$Doe$pred_f$pm <- tmp$pi
+gusto_collector$Doe$pred_f$cri <- plogis(c(qlogis(gusto_collector$Doe$pred_f$pe)) + c(-1.96, 1.96) * tmp$sd_eta)
+s <- gusto_collector$models$reg_f$eq
+for(i in seq_along(settings$Doe[-1])) {
+    s <- gsub(
+        paste0("\\[X", i, "\\]"),
+        paste0("*", settings$Doe[i + 1]),
+        s
+    )
+}
+gusto_collector$Doe$eq <- s
+
+# ---- Self-projection of flat-prior PM ----
+reg_f_pp <- glm.fit(X, df_sample$pred_pm_f, family = binomial())
+df_sample$pred_pm_f_pp <- plogis(X %*% reg_f_pp$coefficients)
+gusto_collector$models$reg_f_pp$coefs <- reg_f_pp$coefficients
+gusto_collector$Doe$pred_f$pp <- plogis(settings$Doe %*% reg_f_pp$coefficients)
+
+
+# ---- Jeffreys prior ----
+reg_j <- update(reg_f, method = "brglmFit", type = "AS_mean")
+gusto_collector$models$reg_j$coefs <- summary(reg_j)$coefficients[,1:2]
+tmp <- predict(reg_j, se.fit = TRUE)
+df_sample$pred_pe_j    <- plogis(tmp$fit)
+df_sample$pred_pm_j    <- predict_pm(X, coef(reg_j), vcov(reg_j))
+df_sample$pred_pm_j_mk <- elogitnorm(tmp$fit, tmp$se.fit, "mackay")
+
+gusto_collector$Doe$pred_j$pe <- plogis(coef(reg_j) %*% settings$Doe)
+tmp <- predict_pm(t(settings$Doe), coef(reg_j), vcov(reg_j), return_sd = T)
+gusto_collector$Doe$pred_j$pm <- tmp$pi
+gusto_collector$Doe$pred_j$pm_mk <- predict_pm(t(settings$Doe), coef(reg_j), vcov(reg_j), "mackay")
+gusto_collector$Doe$pred_j$cri <- plogis(c(qlogis(gusto_collector$Doe$pred_j$pe)) + c(-1.96, 1.96) * tmp$sd_eta)
+
+
+# ---- log-F(2,2) prior ----
+reg_lf <- logf_glm(X, df_sample$Y)
+df_sample$pred_pm_lf <- predict_pm(X, reg_lf$coefficients, reg_lf$vcov)
+gusto_collector$models$reg_lf$coefs <- cbind(estimates = reg_lf$coefficients, SE = reg_lf$se)
+
+gusto_collector$Doe$pred_lf$pe <- plogis(reg_lf$coefficients %*% settings$Doe)
+tmp <- predict_pm(t(settings$Doe), reg_lf$coefficients, reg_lf$vcov, return_sd = T)
+gusto_collector$Doe$pred_lf$pm <- tmp$pi
+gusto_collector$Doe$pred_lf$cri <- plogis(c(qlogis(gusto_collector$Doe$pred_lf$pe)) + c(-1.96, 1.96) * tmp$sd_eta)
+
+
+# ---- Bayesian Ridge ----
+reg_br <- bayesian_ridge(X, df_sample$Y)
+df_sample$pred_pm_br <- predict_pm(X, reg_br$beta, reg_br$V)
+gusto_collector$models$reg_br$coefs <- cbind(estimate = reg_br$beta, SE = sqrt(diag(reg_br$V)))
+
+gusto_collector$Doe$pred_br$pe <- plogis(settings$Doe %*% reg_br$beta)
+tmp <- predict_pm(t(settings$Doe), reg_br$beta, reg_br$V, return_sd = T)
+gusto_collector$Doe$pred_br$pm <- tmp$pi
+gusto_collector$Doe$pred_br$pm_mk <- predict_pm(t(settings$Doe), reg_br$beta, reg_br$V, method = "mackay")
+gusto_collector$Doe$pred_br$cri <- plogis(c(qlogis(gusto_collector$Doe$pred_br$pe)) + c(-1.96, 1.96) * tmp$sd_eta)
+
+
+# ---- Frequentist Ridge (cv.glmnet) — no CrI ----
+reg_rg <- cv.glmnet(X, df_sample$Y, alpha = 0, family = "binomial", type.measure = "deviance")
+gusto_collector$models$reg_rg$coefs <- coef(reg_rg, s = "lambda.min")[-2, ]
+gusto_collector$models$reg_rg$eq <- coef(reg_rg, s = "lambda.min")
+df_sample$pred_ridge_min <- plogis(as.numeric(predict(reg_rg, newx = X, s = "lambda.min")))
+gusto_collector$Doe$pred_rg$pe <- plogis(coef(reg_rg, s = "lambda.min")[-2, ] %*% settings$Doe)
+
+
+# ---- Frequentist LASSO (cv.glmnet) — no CrI ----
+reg_ls <- cv.glmnet(X, df_sample$Y, alpha = 1, family = "binomial", type.measure = "deviance")
+gusto_collector$models$reg_ls$coefs <- coef(reg_ls, s = "lambda.min")[-2, ]
+gusto_collector$models$reg_ls$eq <- coef(reg_ls, s = "lambda.min")
+df_sample$pred_lasso_min <- plogis(as.numeric(predict(reg_ls, newx = X, s = "lambda.min")))
+gusto_collector$Doe$pred_ls$pe <- plogis(coef(reg_ls, s = "lambda.min")[-2, ] %*% settings$Doe)
+
+
+model <- reg_j
+
+
+
+
+
+
+
+
+
+
+# ----- Save coefficients table for downstream rendering -----
+# Build a wide tidy frame: one row per term, columns alternate est/se
+# for models with vcov, est-only for models without. We also persist a
+# small metadata vector recording which models have SE so the
+# rendering chunk can construct the spanning header without hardcoding.
+
+build_coefs_data <- function(models, digits = 3) {
+  # Establish term order from the first model that has named coefs.
+  terms <- NULL
+  for (m in models) {
+    co <- m$coefs
+    if (is.null(co)) next
+    terms <- if (is.matrix(co) || is.data.frame(co)) rownames(co) else names(co)
+    if (!is.null(terms)) break
+  }
+  if (is.null(terms)) stop("No named coefficients found")
+
+  cols     <- list(Term = terms)
+  has_se   <- character(0)  # model keys that have SE
+  est_only <- character(0)  # model keys without SE
+
+  for (nm in names(models)) {
+    co <- models[[nm]]$coefs
+    if (is.null(co)) next
+    if ((is.matrix(co) || is.data.frame(co)) && ncol(co) >= 2) {
+      cols[[paste0(nm, "_est")]] <- round(co[, 1], digits)
+      cols[[paste0(nm, "_se")]]  <- round(co[, 2], digits)
+      has_se <- c(has_se, nm)
+    } else {
+      est_vec <- if (is.matrix(co) || is.data.frame(co)) co[, 1] else as.numeric(co)
+      cols[[paste0(nm, "_est")]] <- round(est_vec, digits)
+      est_only <- c(est_only, nm)
+    }
+  }
+
+  list(
+    df       = as.data.frame(cols, check.names = FALSE),
+    has_se   = has_se,
+    est_only = est_only
+  )
+}
+
+coefs_table_data <- build_coefs_data(gusto_collector$models, digits = 3)
+
+#MS: change X to proper var names
+coefs_table_data$df$Term[-1]<-settings$var_specs$short_name[match(coefs_table_data$df$Term[-1], settings$var_specs$key)]
+
+kable(coefs_table_data)
+
+kable(unlist(gusto_collector$Doe))
+
+saveRDS(gusto_collector, file = paste0(res_dir, "gusto_collector.rds"))
+saveRDS(coefs_table_data, file = paste0(res_dir, "gusto_coefs_table.rds"))
+```
+
+
+
+
+### Visualization
+
+```{r}
+
+
+lp_pe_f     <- logit(df_sample$pred_pe_f)
+lp_pm_f     <- logit(df_sample$pred_pm_f)
+lp_ridge    <- logit(df_sample$pred_ridge_min)
+lp_lasso    <- logit(df_sample$pred_lasso_min)
+lp_pm_j     <- logit(df_sample$pred_pm_j)
+lp_pm_lf    <- logit(df_sample$pred_pm_lf)
+lp_pm_br    <- logit(df_sample$pred_pm_br)
+
+# Methods are tagged with type (Bayesian PM vs frequentist PE) so the
+# plot can colour them differently — frequentist methods in grey to
+# emphasise that the comparison axis is "PM under different priors",
+# with frequentist regularisers as a non-Bayesian reference.
+plot_df <- tibble(
+  `Posterior Mean - flat`       = lp_pm_f,
+  `Posterior Mean - Jeffreys`   = lp_pm_j,
+  `Posterior Mean - log-F`      = lp_pm_lf,
+  `Posterior Mean - Gaussian`   = lp_pm_br,
+  `Plug-in Estimate - Ridge`      = lp_ridge,
+  `Plug-in Estimate - LASSO`      = lp_lasso,
+  lp_pe_f                       = lp_pe_f
+) %>%
+  pivot_longer(-lp_pe_f, names_to = "method", values_to = "lp") %>%
+  mutate(
+    delta = lp - lp_pe_f,
+    method = factor(method, levels = c("Posterior Mean - flat",
+                                       "Posterior Mean - Jeffreys",
+                                       "Posterior Mean - log-F",
+                                       "Posterior Mean - Gaussian",
+                                       "Plug-in Estimate - Ridge",
+                                       "Plug-in Estimate - LASSO")),
+    method_type = ifelse(grepl("^Posterior Mean", method),
+                         "Bayesian PM", "Frequentist PE")
+  )
+
+
+
+label_df <- data.frame(
+  method = unique(plot_df$method),
+  label = LETTERS[1:6], 
+  x = -Inf, 
+  y = Inf
+)
+
+
+
+plt <- ggplot(plot_df, aes(x = lp_pe_f, y = delta, color = method_type)) +
+  geom_hline(yintercept = 0, color = "grey60", linetype = "dashed") +
+  geom_point(alpha = 0.4, size = 1.5) +
+  scale_color_manual(values = c(`Bayesian PM`   = "#2c3e50",
+                                `Frequentist PE` = "grey55"),
+                     guide = "none") +
+  facet_wrap(~ method, nrow = 2) +
+  coord_cartesian(ylim = c(-0.5, 0.75)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    panel.spacing    = unit(1, "lines")
+  ) +
+  labs(x = expression("Unpenalised linear predictor ("~ eta ~ ")"), y = expression("Δ for each method versus unpenlised " ~ eta))+
+  geom_text(data = label_df, 
+          aes(x = x, y = y, label = label),
+          hjust = -7, 
+          vjust = 1.5, 
+          inherit.aes = FALSE, 
+          fontface = "bold", 
+          size = 3,
+          color = "black")
+
+
+
+all_vals <- c(plot_df$lp_pe_f, plot_df$delta)
+mx <- max(abs(all_vals), na.rm = TRUE)
+lims <- c(-mx, mx)
+plt2 <- ggplot(plot_df, aes(x = lp_pe_f, y = delta, color = method_type)) +
+  geom_hline(yintercept = 0, color = "grey60", linetype = "dashed") +
+  geom_point(alpha = 0.4, size = 1.5) +
+  scale_x_continuous(limits = lims) +
+  scale_y_continuous(limits = lims) +
+  scale_color_manual(values = c(`Bayesian PM`   = "#2c3e50",
+                                `Frequentist PE` = "grey55"),
+                     guide = "none") +
+  facet_wrap(~ method, nrow = 2) +
+  #coord_cartesian(ylim = c(-0.5, 0.75)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    panel.spacing    = unit(1, "lines")
+  ) +
+  labs(x = expression("Unpenalised linear predictor ("~ eta ~ ")"), y = expression("Δ for each method v. unpeanlised " ~ eta))+
+  geom_text(data = label_df, 
+          aes(x = x, y = y, label = label),
+          hjust = -7, 
+          vjust = 1.5, 
+          inherit.aes = FALSE, 
+          fontface = "bold", 
+          size = 3,
+          color = "black")
+
+
+
+plt
+ggsave(filename=paste0(res_dir,"gusto_shrinkage.png"), plot=plt,  height=10, width=15, units="cm")
+
+plt2
+#ggsave(filename=paste0(res_dir,"gusto_shrinkage.png"), plot=plt2,  height=10, width=15, units="cm")
+
+```
+
+
+
+
+## Simulation studies
+
+```{r}
+
+sim <- function() {
+  out <- c()
+
+  for (n in settings$ns) {
+    preds <- NULL
+
+    ids <- sample(nrow(df_final), n)
+    df_samp <- df_final[ids, ]
+    df_pop  <- df_final[-ids, ]
+
+    mm_samp <- model.matrix(settings$fm_model, df_samp)
+    mm_pop  <- model.matrix(settings$fm_model, df_pop)
+
+    # --- Unpenalised MLE family ---
+    need_mle <- any(c("pe_f", "pm_f", "pm_f_mk", "pm_f_pp", "pm_f_cpp") %in% settings$methods)
+    need_j   <- any(c("pe_j", "pm_j", "pm_j_mk", "pm_j_pp", "pm_j_cpp") %in% settings$methods)
+    need_lf  <- any(c("pe_lf", "pm_lf", "pm_lf_mk", "pm_lf_pp", "pm_lf_cpp") %in% settings$methods)
+    need_br  <- any(c("pe_br", "pm_br", "pm_br_mk", "pm_br_pp", "pm_br_cpp") %in% settings$methods)
+
+    if (need_mle || need_j) {
+      reg <- glm(settings$fm_model, data = df_samp, family = binomial())
+
+      if ("pe_f" %in% settings$methods) {
+        preds <- cbind(preds, predict(reg, newdata = df_pop, type = "response"))
+        colnames(preds)[ncol(preds)] <- "pe_f"
+      }
+      if ("pm_f" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg), vcov(reg)))
+        colnames(preds)[ncol(preds)] <- "pm_f"
+      }
+      if ("pm_f_mk" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg), vcov(reg), "mackay"))
+        colnames(preds)[ncol(preds)] <- "pm_f_mk"
+      }
+      if (any(c("pm_f_pp", "pm_f_cpp") %in% settings$methods)) {
+        pm_samp_f <- predict_pm(mm_samp, coef(reg), vcov(reg))
+      }
+      if ("pm_f_pp" %in% settings$methods) {
+        reg_f_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_f, family = binomial()))
+        preds <- cbind(preds, plogis(mm_pop %*% coef(reg_f_pp)))
+        colnames(preds)[ncol(preds)] <- "pm_f_pp"
+      }
+      if ("pm_f_cpp" %in% settings$methods) {
+        cfs <- project_constrained_kl(pm_samp_f, mm_samp, sum(df_samp$Y))
+        preds <- cbind(preds, plogis(mm_pop %*% cfs))
+        colnames(preds)[ncol(preds)] <- "pm_f_cpp"
+      }
+    }
+
+    # --- Firth family ---
+    if (need_j) {
+      reg_j <- update(reg, method = "brglmFit", type = "AS_mean")
+
+      if ("pe_j" %in% settings$methods) {
+        preds <- cbind(preds, predict(reg_j, newdata = df_pop, type = "response"))
+        colnames(preds)[ncol(preds)] <- "pe_j"
+      }
+      if ("pm_j" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg_j), vcov(reg_j)))
+        colnames(preds)[ncol(preds)] <- "pm_j"
+      }
+      if ("pm_j_mk" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg_j), vcov(reg_j), "mackay"))
+        colnames(preds)[ncol(preds)] <- "pm_j_mk"
+      }
+      if(any(c("pm_j_pp","pm_j_cpp") %in% settings$methods)){
+        pm_samp_j  <- predict_pm(mm_samp, coef(reg_j), vcov(reg_j))
+      }
+      if ("pm_j_pp" %in% settings$methods) {
+        reg_j_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_j, family = binomial()))
+        preds <- cbind(preds, plogis(mm_pop %*% coef(reg_j_pp)))
+        colnames(preds)[ncol(preds)] <- "pm_j_pp"
+      }
+      if ("pm_j_cpp" %in% settings$methods) {
+        cfs <- project_constrained_kl(pm_samp_j, mm_samp, sum(df_samp$Y))
+        preds <- cbind(preds, plogis(mm_pop %*% cfs))
+        colnames(preds)[ncol(preds)] <- "pm_j_cpp"
+      }
+    }
+
+    # --- log-F(m, m) family ---
+    # Weakly-informative shrinkage prior on slopes; intercept flat.
+    # See Greenland & Mansournia 2015. logf_glm() is in core.R.
+    if (need_lf) {
+      reg_lf <- logf_glm(mm_samp, df_samp$Y, m = settings$logf_m)
+
+      if ("pe_lf" %in% settings$methods) {
+        preds <- cbind(preds, plogis(mm_pop %*% coef(reg_lf)))
+        colnames(preds)[ncol(preds)] <- "pe_lf"
+      }
+      if ("pm_lf" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg_lf), vcov(reg_lf)))
+        colnames(preds)[ncol(preds)] <- "pm_lf"
+      }
+      if ("pm_lf_mk" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, coef(reg_lf), vcov(reg_lf), "mackay"))
+        colnames(preds)[ncol(preds)] <- "pm_lf_mk"
+      }
+      if (any(c("pm_lf_pp", "pm_lf_cpp") %in% settings$methods)) {
+        pm_samp_lf <- predict_pm(mm_samp, coef(reg_lf), vcov(reg_lf))
+      }
+      if ("pm_lf_pp" %in% settings$methods) {
+        reg_lf_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_lf, family = binomial()))
+        preds <- cbind(preds, plogis(mm_pop %*% coef(reg_lf_pp)))
+        colnames(preds)[ncol(preds)] <- "pm_lf_pp"
+      }
+      if ("pm_lf_cpp" %in% settings$methods) {
+        cfs <- project_constrained_kl(pm_samp_lf, mm_samp, sum(df_samp$Y))
+        preds <- cbind(preds, plogis(mm_pop %*% cfs))
+        colnames(preds)[ncol(preds)] <- "pm_lf_cpp"
+      }
+    }
+    
+    # --- Bayesian ridge family ---
+    if (need_br) {
+      reg_br <- bayesian_ridge(mm_samp, df_samp$Y)
+
+      if ("pe_br" %in% settings$methods) {
+        preds <- cbind(preds, plogis(mm_pop %*% reg_br$beta))
+        colnames(preds)[ncol(preds)] <- "pe_br"
+      }
+      if ("pm_br" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, reg_br$beta, reg_br$V))
+        colnames(preds)[ncol(preds)] <- "pm_br"
+      }
+      if ("pm_br_mk" %in% settings$methods) {
+        preds <- cbind(preds, predict_pm(mm_pop, reg_br$beta, reg_br$V, "mackay"))
+        colnames(preds)[ncol(preds)] <- "pm_br_mk"
+      }
+      if (any(c("pm_br_pp", "pm_br_cpp") %in% settings$methods)) {
+        pm_samp_br <- predict_pm(mm_samp, reg_br$beta, reg_br$V)
+      }
+      if ("pm_br_pp" %in% settings$methods) {
+        reg_br_pp <- suppressWarnings(glm.fit(mm_samp, pm_samp_br, family = binomial()))
+        preds <- cbind(preds, plogis(mm_pop %*% coef(reg_br_pp)))
+        colnames(preds)[ncol(preds)] <- "pm_br_pp"
+      }
+      if ("pm_br_cpp" %in% settings$methods) {
+        cfs <- project_constrained_kl(pm_samp_br, mm_samp, sum(df_samp$Y))
+        preds <- cbind(preds, plogis(mm_pop %*% cfs))
+        colnames(preds)[ncol(preds)] <- "pm_br_cpp"
+      }
+    }
+
+    # --- LASSO ---
+    if (any(c("pe_lasso_min", "pe_lasso_1se") %in% settings$methods)) {
+      reg_s <- cv.glmnet(mm_samp, df_samp$Y, family = "binomial",
+                         type.measure = "deviance")
+      if ("pe_lasso_min" %in% settings$methods) {
+        preds <- cbind(preds, as.numeric(
+          predict(reg_s, newx = mm_pop, s = "lambda.min", type = "response")
+        ))
+        colnames(preds)[ncol(preds)] <- "pe_lasso_min"
+      }
+      if ("pe_lasso_1se" %in% settings$methods) {
+        preds <- cbind(preds, as.numeric(
+          predict(reg_s, newx = mm_pop, s = "lambda.1se", type = "response")
+        ))
+        colnames(preds)[ncol(preds)] <- "pe_lasso_1se"
+      }
+    }
+
+    # --- Ridge ---
+    if (any(c("pe_ridge_min", "pe_ridge_1se") %in% settings$methods)) {
+      reg_s <- cv.glmnet(mm_samp, df_samp$Y, alpha = 0, family = "binomial",
+                         type.measure = "deviance")
+      if ("pe_ridge_min" %in% settings$methods) {
+        preds <- cbind(preds, as.numeric(
+          predict(reg_s, newx = mm_pop, s = "lambda.min", type = "response")
+        ))
+        colnames(preds)[ncol(preds)] <- "pe_ridge_min"
+      }
+      if ("pe_ridge_1se" %in% settings$methods) {
+        preds <- cbind(preds, as.numeric(
+          predict(reg_s, newx = mm_pop, s = "lambda.1se", type = "response")
+        ))
+        colnames(preds)[ncol(preds)] <- "pe_ridge_1se"
+      }
+    }
+
+    # --- Metrics ---
+    iter_res <- list()
+    method_names <- colnames(preds)
+
+    if ("mse" %in% settings$metrics) {
+      values <- colMeans((preds - df_pop$Y)^2)
+      iter_res$mse <- data.frame(metric = "mse", method = method_names, value = values)
+    }
+
+    if ("cstat" %in% settings$metrics) {
+      values <- sapply(seq_len(ncol(preds)), function(j) {
+        as.numeric(pROC::auc(df_pop$Y, preds[, j], quiet = TRUE))
+      })
+      iter_res$cstat <- data.frame(metric = "cstat", method = method_names, value = values)
+    }
+
+    if ("oe_ratio" %in% settings$metrics) {
+      obs <- sum(df_pop$Y)
+      values <- obs / colSums(preds)
+      iter_res$oe_ratio <- data.frame(metric = "oe_ratio", method = method_names, value = values)
+    }
+
+    if ("cal_slp" %in% settings$metrics) {
+      values <- sapply(seq_len(ncol(preds)), function(j) {
+        p_adj   <- pmin(pmax(preds[, j], 1e-15), 1 - 1e-15)
+        logit_p <- log(p_adj / (1 - p_adj))
+        fit_cal <- suppressWarnings(
+          glm.fit(cbind(1, logit_p), df_pop$Y, family = binomial())
+        )
+        slp <- fit_cal$coefficients[2]
+        # Degenerate predictions (LASSO/ridge shrunk to near-constant) → null model
+        if (!isTRUE(fit_cal$converged) || is.na(slp)) slp <- 0
+        unname(slp)
+      })
+      iter_res$cal_slp <- data.frame(metric = "cal_slp", method = method_names, value = values)
+    }
+
+    if ("nb" %in% settings$metrics) {
+      iter_res$nb <- data.frame()
+      for (z in settings$z) {
+        nb_term <- df_pop$Y - (1 - df_pop$Y) * z / (1 - z)
+        nb0 <- max(0, mean(nb_term))
+        values <- sapply(seq_len(ncol(preds)), function(j) {
+          mean((preds[, j] > z) * nb_term) - nb0
+        })
+        iter_res$nb <- rbind(
+          iter_res$nb,
+          data.frame(metric = paste0("nb", z), method = method_names, value = values)
+        )
+      }
+    }
+
+    out <- rbind(out, cbind(n = n, do.call(rbind, iter_res)))
+  }
+
+  out
+}
+
+```
+
+
+
+
+```{r}
+n_cores <- NULL
+n_sim   <- settings$n_sim
+
+if (is.null(n_cores)) {
+  no_cores <- min(parallel::detectCores() - 1, n_sim)
+} else {
+  no_cores <- n_cores
+}
+
+if (no_cores > 1) {
+  cl <- makeCluster(no_cores)
+  registerDoSNOW(cl)
+  parallel::clusterExport(cl, varlist = c("df_final", "settings"))
+  clusterCall(cl, function() source("core.R"))
+  message(paste("Running in PARALLEL on", no_cores, "cores"))
+} else {
+  registerDoSEQ()
+  cl <- NULL
+  message("Running SEQUENTIALLY in console")
+}
+
+pb <- txtProgressBar(min = 0, max = n_sim, style = 3)
+progress <- function(n) setTxtProgressBar(pb, n)
+opts <- if (interactive()) list(progress = progress) else list()
+
+res <- foreach(
+  i = 1:n_sim,
+  .combine = 'rbind',
+  .options.snow = opts,
+  .packages = c("glmnet", "mvtnorm", "pROC", "brglm2")
+) %dorng% {
+  cat(i)
+  cbind(iteration = i, sim())
+}
+
+close(pb)
+if (!is.null(cl)) stopCluster(cl)
+
+res$metric <- as.factor(res$metric)
+res$method <- as.factor(res$method)
+
+# Report NA / outlier rate in cal_slp for sanity
+if ("cal_slp" %in% settings$metrics) {
+  cal_summary <- res %>%
+    filter(as.character(metric) == "cal_slp") %>%
+    group_by(method) %>%
+    summarise(
+      n        = n(),
+      n_zero   = sum(value == 0),
+      n_extreme = sum(!is.na(value) & abs(value) > 3),
+      .groups  = "drop"
+    ) %>%
+    filter(n_zero > 0 | n_extreme > 0)
+  if (nrow(cal_summary) > 0) {
+    cat("\nDegenerate / extreme cal_slp (replaced NA with 0):\n")
+    print(as.data.frame(cal_summary), row.names = FALSE)
+  }
+}
+
+saveRDS(res, file = file.path(res_dir, "sim_gusto_results.rds"))
+
+```
+
+
+
+
+## Plots
+
+```{r}
+
+res <- readRDS(file.path(res_dir, "sim_gusto_results.RDS"))
+
+# pmpeeff <- c()
+# for(z in paste0("nb",settings$z)){
+#   A <- (res |> filter(n==500 & method %in% c("pe_f", "pe_j", "pe_lf", "pe_br") & metric==z) |> select(value))[[1]]
+#   B <- (res |> filter(n==500 & method %in% c("pm_f", "pm_j", "pm_lf", "pm_br") & metric==z) |> select(value))[[1]]
+#   C <- (res |> filter(n==1000 & method %in% c("pe_f", "pe_j", "pe_lf", "pe_br") & metric==z) |> select(value))[[1]]
+#   
+#   pmpeeff <- c(pmpeeff, mean(B-A)/mean(C-A))
+# }
+# 
+# saveRDS(pmpeeff, file.path(res_dir,"gusto_pmpeeff.rds"))
+
+
+df_pmpeeff <- data.frame(z=double(), epv=integer(), method=character(), nb=double())
+for(z_ in settings$z){
+  for(method_ in c("pe","pm")){
+    for(n_ in c(500,1000)){
+      A <- mean((res |> filter(n==n_ & method %in% paste0(method_, c("_f","_j","_lf","_br")) & metric==paste0("nb",z_)) |> select(value))[[1]])
+      df_pmpeeff <- rbind(df_pmpeeff, data.frame(z=z_, n=n_, method=method_, nb=A))
+    }
+  }
+}
+
+nms <- apply(df_pmpeeff, 1, function(x){sprintf("%s|%s|%s", x['z'],x['n'],x['method'])})
+rownames(df_pmpeeff) <- gsub(" ", "", nms)
+
+saveRDS(df_pmpeeff, file.path(res_dir,"gusto_pmpeeff.rds"))
+
+
+
+# =========================================================================
+# Main-effects plots, styled to match the synthetic-simulation figures:
+#   rows = metrics, x = n, point + whiskers, methods dodged
+#   centrality: mean for most metrics; median for cal_slp and oe_ratio
+#   (heavy-tailed). Whiskers always show the IQR (Q25, Q75) across
+#   replicates — chosen so they stay within metric ranges (e.g., MSE
+#   non-negative) and are robust to outlier replicates.
+# =========================================================================
+
+# =========================================================================
+# Method registry — single source of truth for plotting.
+#
+# Each method gets one row. The four lookup vectors used by the plot
+# builders (method_labels, method_colors, method_shapes, and the default
+# display order) are derived from this. To add a new method to the plots,
+# add a single row and nothing else.
+#
+# Naming convention (just documentation; not enforced by the code):
+#   <estimator>_<prior>[_<computation>]
+#     estimator : pe (point estimate) or pm (posterior mean)
+#     prior     : f (flat), j (Jeffreys), lf (log-F), ridge, lasso, br, ...
+#     comp.     : omitted = quadrature (exact); mk = MacKay;
+#                 pp = self-projection; cpp = constrained self-proj.;
+#                 min, 1se for CV-based LASSO/ridge
+# =========================================================================
+
+q_range <- c(0.25, 0.75)
+
+method_registry <- tibble::tribble(
+  ~key,            ~label,                                 ~color,     ~shape,
+  "pe_f",          "PE (flat)",                           "#1F4E79",  1,
+  "pm_f",          "PM (flat)",                           "#1F4E79",  16,
+  "pm_f_mk",       "PM (flat, MacKay)",                   "#1F4E79",  16,
+  "pm_f_pp",       "PM (flat, self-proj.)",               "#1F4E79",  16,
+  "pm_f_cpp",      "PM (flat, constr. self-proj.)",       "#1F4E79",  16,
+
+  "pe_j",          "PE (Jeffreys)",                       "#884553",  0,
+  "pm_j",          "PM (Jeffreys)",                       "#884553",  15,
+  "pm_j_mk",       "PM (Jeffreys, MacKay)",               "#884553",  15,
+  "pm_j_pp",       "PM (Jeffreys, self-proj.)",           "#884553",  15,
+  "pm_j_cpp",      "PM (Jeffreys, constr. self-proj.)",   "#884553",  15,
+
+  "pe_lf",         "PE (log-F)",                          "#009E73",  2,
+  "pm_lf",         "PM (logF)",                           "#009E73",  17,
+  "pm_lf_mk",      "PM (logF, MacKay)",                   "#009E73",  17,
+  "pm_lf_pp",      "PM (logF, self-proj.)",               "#009E73",  17,
+  "pm_lf_cpp",     "PM (logF, constr. self-proj.)",       "#009E73",  17,
+
+  "pe_br",         "PE (Bayes. ridge)",                       "#E07B00",  5,
+  "pm_br",         "PM (Bayes. ridge)",                       "#E07B00",  18,
+  "pm_br_mk",      "PM (Bayes. ridge, MacKay)",               "#E07B00",  18,
+  "pm_br_pp",      "PM (Bayes. ridge, self-proj.)",           "#E07B00",  18,
+  "pm_br_cpp",     "PM (Bayes. ridge, constr. self-proj.)",   "#E07B00",  18,
+
+  "pe_ridge_min",  "Ridge (CV-min)",                       "#AAAAAA",  2,
+  "pe_lasso_min",  "LASSO (CV-min)",                       "#AAAAAA",  6,
+)
+
+
+# ---- Derive lookup vectors ----
+method_labels <- setNames(method_registry$label, method_registry$key)
+method_colors <- setNames(method_registry$color, method_registry$key)
+method_shapes <- setNames(method_registry$shape, method_registry$key)
+default_method_order <- method_registry$key
+
+metric_labels <- c(
+  mse      = "MSE",
+  cstat    = "C-statistic",
+  oe_ratio = "O/E ratio",
+  cal_slp  = "Calibration slope",
+  nb0.02   = "sNB (z = 0.02)",
+  nb0.05   = "sNB (z = 0.05)",
+  nb0.10    = "sNB (z = 0.10)"
+)
+
+default_metric_order <- c("mse", "cstat", "oe_ratio", "cal_slp",
+                          "nb0.02", "nb0.05", "nb0.1")
+
+metric_reference <- list(
+  cal_slp  = 1,
+  oe_ratio = 1
+)
+
+# ---- Per-metric summary specification ----
+# For each metric, independently choose:
+#   - `center`: which centrality to display ("mean" or "median")
+#   - `range` : how to compute lower/upper whiskers ("sd" or "quant")
+# When range = "quant", the quantile pair comes from the global q_range
+# vector (default: c(0.25, 0.75)).
+# To override for a particular plot, pass a modified list to the
+# `summary_spec` argument of build_plot()/build_computation_plot().
+metric_summary_spec <- list(
+  mse      = list(center = "mean",   range = "sd"),
+  cstat    = list(center = "mean",   range = "sd"),
+  oe_ratio = list(center = "median", range = "quant"),
+  cal_slp  = list(center = "median", range = "quant"),
+  nb0.02   = list(center = "mean",   range = "sd"),
+  nb0.05   = list(center = "mean",   range = "sd"),
+  nb0.1    = list(center = "mean",   range = "sd")
+)
+
+# ---- Centrality / whisker helpers ----
+# Each helper takes the per-metric data vector x and a single-string
+# spec, returning a scalar. compute_lower / compute_upper are split
+# (rather than one helper returning length-2) so that summarise() can
+# call them directly without list-unpacking.
+
+compute_center <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 1) return(NA_real_)
+  switch(spec,
+         mean   = mean(x),
+         median = median(x),
+         stop("Unknown centrality spec: ", spec))
+}
+
+compute_lower <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 2) return(NA_real_)
+  switch(spec,
+         sd    = mean(x) - sd(x),
+         quant = unname(quantile(x, q_range[1], na.rm = TRUE)),
+         stop("Unknown range spec: ", spec))
+}
+
+compute_upper <- function(x, spec) {
+  x <- x[!is.na(x)]
+  if (length(x) < 2) return(NA_real_)
+  switch(spec,
+         sd    = mean(x) + sd(x),
+         quant = unname(quantile(x, q_range[2], na.rm = TRUE)),
+         stop("Unknown range spec: ", spec))
+}
+
+# Resolve the metric's summary spec at aggregation time. `metric_key`
+# is the lowercase key (e.g., "mse"), not the display label. Returns
+# the list (center, range) for that metric, falling back to mean+quant
+# if the metric isn't in the spec.
+get_summary_spec <- function(metric_key, spec_table = metric_summary_spec) {
+  s <- spec_table[[metric_key]]
+  if (is.null(s)) return(list(center = "mean", range = "quant"))
+  s
+}
+
+# Prepare data: relabel metric values, keep method as character
+res_plot <- res %>%
+  mutate(
+    method = as.character(method),
+    metric = as.character(metric)
+  ) %>%
+  mutate(metric = ifelse(metric %in% names(metric_labels),
+                         metric_labels[metric], metric))
+
+
+build_plot <- function(data, figure_title = NULL,
+                       method_order  = default_method_order,
+                       metric_order  = default_metric_order,
+                       summary_spec  = metric_summary_spec) {
+
+  # Method ordering. Keep only methods that (a) appear in the data AND
+  # (b) are known to method_labels/colors/shapes AND (c) are either point
+  # estimates or quadrature PMs. Non-quadrature PM variants (_mk / _pp /
+  # _cpp) are automatically excluded from the main plot — they belong on
+  # the dedicated computation-comparison plot. This isolates the prior
+  # comparison from the deployment-method comparison.
+  is_main_plot_method <- function(k) {
+    parts <- strsplit(k, "_", fixed = TRUE)[[1]]
+    if (length(parts) < 1) return(FALSE)
+    if (parts[1] == "pe") return(TRUE)
+    if (parts[1] == "pm") return(length(parts) <= 2)  # pm_<prior>, no comp suffix
+    TRUE  # any other prefix (e.g. user-added) passes through
+  }
+  avail <- unique(as.character(data$method))
+  known <- names(method_labels)
+  candidates <- intersect(avail, known)
+  candidates <- candidates[vapply(candidates, is_main_plot_method, logical(1))]
+  method_order <- method_order[method_order %in% candidates]
+  extra <- setdiff(candidates, method_order)
+  method_order <- c(method_order, extra)
+
+  data <- data %>%
+    filter(as.character(method) %in% method_order) %>%
+    mutate(method = factor(method, levels = method_order))
+
+  data <- data %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = factor(as.character(metric),
+                           levels = metric_labels[metric_order]))
+
+  # Per-metric aggregation. The summary spec for each metric (centrality
+  # and range type) is looked up via metric_summary_spec; see helpers
+  # compute_center / compute_lower / compute_upper.
+  data$metric_key <- names(metric_labels)[match(as.character(data$metric),
+                                                metric_labels)]
+
+  agg <- data %>%
+    group_by(metric, metric_key, method, n) %>%
+    summarise(
+      n_sim  = sum(!is.na(value)),
+      center = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+      lo     = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi     = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(metric, method, n, center, lo, hi)
+
+  ref_df <- data.frame(
+    metric_key = names(metric_reference),
+    yint       = unlist(metric_reference)
+  ) %>%
+    mutate(metric = factor(metric_labels[metric_key],
+                           levels = metric_labels[metric_order])) %>%
+    filter(!is.na(metric)) %>%
+    select(metric, yint)
+
+  dodge_width <- 0.6
+
+  p <- ggplot(agg, aes(x = factor(n), y = center,
+                       color = method, shape = method, group = method)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3,
+                  position = position_dodge(width = dodge_width),
+                  linewidth = 0.4) +
+    geom_point(size = 2,
+               position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(metric),
+      scales = "free_y",
+      independent = "y"
+    ) +
+    scale_color_manual(values = method_colors, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    scale_shape_manual(values = method_shapes, labels = method_labels[method_order],
+                       breaks = method_order, drop = FALSE, name = "Method") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = "Training sample size",
+      y = NULL
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 9),
+      strip.text.y       = element_text(angle = 0, hjust = 0),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 9)
+    ) +
+    guides(color = guide_legend(nrow = 2, byrow = TRUE),
+           shape = guide_legend(nrow = 2, byrow = TRUE))
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(
+      data = ref_df,
+      aes(yintercept = yint),
+      linetype = "dashed", colour = "grey40", linewidth = 0.4,
+      inherit.aes = FALSE
+    )
+  }
+
+  list(plot=p, data=agg)
+}
+
+fig <- build_plot(res_plot, NULL)
+print(fig$plot)
+
+# Save
+ggsave(paste0(res_dir, "sim_gusto_main.png"), fig$plot, width = 9, height = 14, dpi = 200)
+
+
+# =========================================================================
+# PM computation-method comparison plot
+#
+# Holds the prior fixed within each column (Flat / Jeffreys / log-F /
+# Bayesian ridge) and varies the PM computation method (quadrature /
+# MacKay / self-projection / CITL-preserving self-projection) within each
+# panel. Y-axis matches the main plot per metric, so the reader can see
+# directly that computation choice has much smaller effect than prior
+# choice.
+# =========================================================================
+
+computation_labels <- c(
+  exact = "Quadrature (exact)",
+  mk    = "MacKay",
+  pp    = "Self-proj." #,cpp   = "CITL-preserving seld-proj."
+)
+computation_colors <- c(
+  exact = "#1F4E79",
+  mk    = "#2E75B6",
+  pp    = "#E07B00" #,cpp   = "#B22222"
+)
+computation_shapes <- c(
+  exact = 16,
+  mk    = 17,
+  pp    = 15,
+  cpp   = 18
+)
+computation_order <- c("exact", "mk", "pp") #, "cpp")
+
+family_labels <- c(
+  f  = "Flat prior",
+  j  = "Jeffreys (Firth)",
+  lf = "log-F(2, 2)",
+  br = "Bayesian ridge"
+)
+family_order <- c("f", "j", "lf", "br")
+
+parse_pm_method <- function(key) {
+  parts <- strsplit(key, "_", fixed = TRUE)[[1]]
+  if (length(parts) < 2 || parts[1] != "pm") {
+    return(c(family = NA_character_, computation = NA_character_))
+  }
+  fam  <- parts[2]
+  comp <- if (length(parts) == 2) "exact" else parts[3]
+  c(family = fam, computation = comp)
+}
+
+
+
+
+# ---- Capture per-metric y-limits from the main plot's aggregation ----
+# Replicates the central+whisker computation but extracts only the
+# per-metric (ymin, ymax) range across all methods, so the computation
+# plot can match exactly.
+get_main_plot_ylims <- function(data,
+                                method_order  = default_method_order,
+                                metric_order  = default_metric_order,
+                                summary_spec  = metric_summary_spec) {
+  # Apply the same method filter that build_plot uses: keep only PE and
+  # quadrature-PM methods. This is essential — if the comp plot inherits
+  # y-limits computed across all PM variants, its rows become wider than
+  # the corresponding rows of the main plot, and the visual comparison
+  # "loss in PM accuracy vs difference between priors" is distorted.
+  is_main_plot_method <- function(k) {
+    parts <- strsplit(k, "_", fixed = TRUE)[[1]]
+    if (length(parts) < 1) return(FALSE)
+    if (parts[1] == "pe") return(TRUE)
+    if (parts[1] == "pm") return(length(parts) <= 2)
+    TRUE
+  }
+  avail <- unique(as.character(data$method))
+  known <- names(method_labels)
+  candidates <- intersect(avail, known)
+  candidates <- candidates[vapply(candidates, is_main_plot_method, logical(1))]
+  method_order <- method_order[method_order %in% candidates]
+
+  data <- data %>%
+    filter(as.character(method) %in% method_order) %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = as.character(metric))
+
+  data$metric_key <- names(metric_labels)[match(data$metric, metric_labels)]
+
+  agg <- data %>%
+    group_by(metric, metric_key, method, n) %>%
+    summarise(
+      lo = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(-metric_key)
+
+  agg %>%
+    group_by(metric) %>%
+    summarise(ymin = min(lo, na.rm = TRUE),
+              ymax = max(hi, na.rm = TRUE),
+              .groups = "drop")
+}
+
+
+main_ylims <- get_main_plot_ylims(res_plot)
+
+
+
+
+# Translate metric keys to labels in main_ylims so they match the
+# computation plot's metric column (which uses labels, not keys).
+main_ylims <- main_ylims %>%
+  mutate(metric = unname(metric_labels[metric]))
+
+
+build_computation_plot <- function(data, figure_title = NULL,
+                                   metric_order  = default_metric_order,
+                                   summary_spec  = metric_summary_spec,
+                                   y_limits      = NULL) {
+
+  pm_keys <- unique(as.character(data$method))
+  pm_keys <- pm_keys[grepl("^pm_", pm_keys)]
+  parsed  = t(sapply(pm_keys, parse_pm_method))
+  valid   <- !is.na(parsed[, "family"]) &
+             parsed[, "family"]      %in% family_order &
+             parsed[, "computation"] %in% computation_order
+  pm_keys <- pm_keys[valid]
+  parsed  <- parsed[valid, , drop = FALSE]
+
+  if (length(pm_keys) == 0) {
+    warning("No PM methods found for computation-comparison plot")
+    return(NULL)
+  }
+
+  key_to_family <- setNames(parsed[, "family"], pm_keys)
+  key_to_comp   <- setNames(parsed[, "computation"], pm_keys)
+
+  data <- data %>%
+    filter(as.character(method) %in% pm_keys) %>%
+    mutate(
+      method      = as.character(method),
+      family      = factor(unname(key_to_family[method]), levels = family_order),
+      computation = factor(unname(key_to_comp[method]),   levels = computation_order)
+    )
+
+  data <- data %>%
+    filter(as.character(metric) %in% metric_labels[metric_order]) %>%
+    mutate(metric = factor(as.character(metric),
+                           levels = metric_labels[metric_order]))
+
+  data$metric_key <- names(metric_labels)[match(as.character(data$metric),
+                                                metric_labels)]
+
+  agg <- data %>%
+    group_by(metric, metric_key, family, computation, n) %>%
+    summarise(
+      n_sim  = sum(!is.na(value)),
+      center = compute_center(value, get_summary_spec(first(metric_key), summary_spec)$center),
+      lo     = compute_lower(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      hi     = compute_upper(value, get_summary_spec(first(metric_key), summary_spec)$range),
+      .groups = "drop"
+    ) %>%
+    select(metric, family, computation, n, center, lo, hi)
+
+  ref_df <- data.frame(
+    metric_key = names(metric_reference),
+    yint       = unlist(metric_reference)
+  ) %>%
+    mutate(metric = factor(metric_labels[metric_key],
+                           levels = metric_labels[metric_order])) %>%
+    filter(!is.na(metric)) %>%
+    select(metric, yint)
+
+  agg_anchors <- NULL
+  if (!is.null(y_limits)) {
+    families_present <- levels(droplevels(agg$family))
+    ns_present       <- unique(agg$n)
+    base_grid <- expand.grid(
+      metric = unique(agg$metric),
+      family = families_present,
+      n      = ns_present,
+      stringsAsFactors = FALSE
+    )
+    base_grid <- base_grid %>%
+      left_join(y_limits, by = "metric") %>%
+      filter(!is.na(ymin), !is.na(ymax))
+
+    agg_anchors <- bind_rows(
+      base_grid %>% mutate(center = ymin),
+      base_grid %>% mutate(center = ymax)
+    ) %>%
+      mutate(
+        lo          = center,
+        hi          = center,
+        computation = factor(computation_order[1], levels = computation_order),
+        family      = factor(family, levels = family_order),
+        metric      = factor(metric, levels = metric_labels[metric_order])
+      ) %>%
+      select(metric, family, computation, n, center, lo, hi)
+  }
+
+  family_labeller <- function(x) family_labels[as.character(x)]
+  dodge_width <- 0.6
+
+  p <- ggplot(agg, aes(x = factor(n), y = center,
+                       color = computation, shape = computation,
+                       group = computation)) +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.3,
+                  position = position_dodge(width = dodge_width),
+                  linewidth = 0.4) +
+    geom_point(size = 2,
+               position = position_dodge(width = dodge_width)) +
+    ggh4x::facet_grid2(
+      rows = vars(metric),
+      cols = vars(family),
+      labeller = labeller(family = family_labeller),
+      scales = "free_y",
+      switch = "x"  # 1. Moves the column (family) labels to the bottom
+    ) +
+    scale_color_manual(values = computation_colors,
+                       labels = computation_labels,
+                       breaks = computation_order,
+                       drop = FALSE, name = "Computation") +
+    scale_shape_manual(values = computation_shapes,
+                       labels = computation_labels,
+                       breaks = computation_order,
+                       drop = FALSE, name = "Computation") +
+    labs(
+      title    = NULL,
+      subtitle = NULL,
+      x = "Training sample size",
+      y = NULL
+    ) +
+    theme_bw(base_size = 9) +
+    theme(
+      legend.position    = "bottom",
+      legend.title       = element_text(face = "bold"),
+      strip.background   = element_rect(fill = "grey92", colour = NA),
+      strip.text         = element_text(face = "bold", size = 8),
+      strip.text.y       = element_text(angle = 0, hjust = 0),
+      strip.placement    = "outside", # 2. Places bottom labels underneath the X-axis numbers
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(colour = "grey35", size = 9),
+      axis.text.x        = element_text(size = 8)
+    ) +
+    guides(color = guide_legend(nrow = 1),
+           shape = guide_legend(nrow = 1))
+
+  if (!is.null(agg_anchors)) {
+    p <- p + geom_blank(data = agg_anchors, aes(y = center))
+  }
+
+  if (nrow(ref_df) > 0) {
+    p <- p + geom_hline(
+      data = ref_df,
+      aes(yintercept = yint),
+      linetype = "dashed", colour = "grey40", linewidth = 0.4,
+      inherit.aes = FALSE
+    )
+  }
+
+  p
+}
+
+fig_comp <- build_computation_plot(
+  res_plot,
+  NULL,
+  y_limits = main_ylims
+)
+print(fig_comp)
+
+ggsave(paste0(res_dir,"sim_gusto_PM.png"), fig_comp, width = 12, height = 14, dpi = 200)
+
+
+
+```
+
