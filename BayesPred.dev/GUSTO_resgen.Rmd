@@ -8,6 +8,7 @@ output:
   word_document: default
 ---
 
+## Setup
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(knitr)
@@ -19,7 +20,8 @@ library(tidyverse)
 library(broom)
 library(ggrepel)
 library(brglm2)
-library(brms)
+library(rstan)
+library(rstanarm)
 library(glmnet)
 library(mcmapper)
 library(parallel)
@@ -35,7 +37,12 @@ library(nloptr)
 
 source("core.R")
 
-res_dir <- "M:/Projects/2026/Project.BayesCPM/results/wip/"
+res_dir <- "M:/Projects/2026/Project.BayesPred/Project.BayesPred.dev/results/wip/"
+
+# Interim/resumable dump directory (run signature, settings, per-replicate
+# results, progress log). MUST differ from res_dir, and should be a LOCAL,
+# non-synced path to avoid file-lock churn from writing many small files.
+dump_dir <- "C:/Users/msafavi/static/sim_results/BayesPred.dev/gusto/"
 
 format_glm_equation <- function(fit, digits = 3, proper_names=NULL) {
   b <- coef(fit)
@@ -56,35 +63,41 @@ format_glm_equation <- function(fit, digits = 3, proper_names=NULL) {
   paste0(parts, collapse = "")
 }
 
-```
 
-
-
-
-
-```{r}
-
-seed <- 123
+# --- Execution parameters ---
+# Do NOT affect results (each replicate is self-seeded and written to its own
+# file), so they are kept out of `settings` / the run signature; changing them
+# never triggers a fresh run.
+#   n_cores    : parallel workers (NULL -> detectCores() - 1)
+#   chunk_size : replicates per dispatch task
+n_cores    <- 20
+chunk_size <- 10
 
 settings <- list(
+  # Master seed: changing it regenerates every replicate (training subsample,
+  # glmnet folds, MCMC draws). It is part of the run signature, so changing it
+  # triggers a fresh run. Keep it a modest integer (stays in 32-bit seed range).
+  seed = 123,
+
+  n_sim = 200,
+
   n_populations = 16,
 
   fm_model  = Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7,
 
-  n_sim = 2500,
-
-  ns = c(500, 1000, 5000),
+  ns = c(250, 500, 1000),
 
   # log-F(m, m) prior strength for slopes (intercept stays flat).
   # m = 2 is weakly informative per Greenland & Mansournia 2015.
   logf_m = 2,
 
-  methods = c('pe_f', 
+  methods = c('pe_f',
               'pm_f', 'pm_f_mk', 'pm_f_pp', '_pm_f_cpp',
-              'pe_j',  'pm_j', 'pm_j_mk', 'pm_j_pp', '_pm_j_cpp', 
+              'pe_j',  'pm_j', 'pm_j_mk', 'pm_j_pp', '_pm_j_cpp',
               'pe_lf', 'pm_lf', 'pm_lf_mk', 'pm_lf_pp',  '_pm_lf_cpp',
               'pe_br', 'pm_br', 'pm_br_mk', 'pm_br_pp', '_pm_br_cpp',
-              'pe_lasso_min', 'pe_ridge_min'),
+              'pm_br_mcmc', '_pm_lasso_mcmc', '_pm_f_mcmc',
+              'pe_ridge_min', '_pe_lasso_min' ),
 
   metrics = c('mse', 'cstat', 'oe_ratio', 'cal_slp', 'nb'),
 
@@ -117,9 +130,8 @@ saveRDS(settings,  file = paste0(res_dir, "gusto_settings.rds"))
 
 
 ## Data wrangling
-
 ```{r tab-desc-data, echo = FALSE, include = FALSE}
-set.seed(seed)
+set.seed(settings$seed)
 data(gusto)
 df  <- gusto
 
@@ -137,7 +149,7 @@ df$population <- df$regl
 df <- df[order(df$regl), c("X1", "X2", "X3", "X4", "X5", "X6", "X7", "Y", "population")]
 df$intercept <- 1
 df_final  <- df
-df_sample <- df_final[sample(nrow(df_final), settings$ns[2]), ]
+df_sample <- df_final[sample(nrow(df_final), 500), ]
 
 
 
@@ -170,7 +182,7 @@ fmt_levels <- function(x, level_labels = NULL) {
 
 # Build one row per variable.
 desc_rows <- vapply(seq_len(nrow(settings$var_specs)), function(i) {
-  v <- df_sample[[settings$var_specs$key[i]]]
+  v <- df_final[[settings$var_specs$key[i]]]
   switch(settings$var_specs$type[i],
          continuous = fmt_continuous(v),
          binary     = fmt_binary(v),
@@ -189,14 +201,15 @@ desc_df <- data.frame(
 # Save for manuscript-side rendering.
 saveRDS(list(
   desc_df    = desc_df,
-  n_total    = nrow(df_sample),
-  n_events   = sum(df_sample$Y == 1, na.rm = TRUE),
-  prevalence = mean(df_sample$Y, na.rm = TRUE)
+  n_total    = nrow(df_final),
+  n_events   = sum(df_final$Y == 1),
+  prevalence = mean(df_final$Y)
 ), file = paste0(res_dir, "table_gusto_desc.rds"))
 
 gusto_collector$gusto$n_dev <- nrow(df_sample)
 gusto_collector$gusto$n_total <- nrow(df_final)
 gusto_collector$gusto$prev_dev <- mean(df_sample$Y)
+gusto_collector$gusto$n_Y_dev <- sum(df_sample$Y)
 gusto_collector$gusto$prev_total <- mean(df_final$Y)
 
 kable(desc_df)
@@ -206,9 +219,11 @@ kable(desc_df)
 
 
 
+
+
 ## Make models, their predictions and add them to df_sample and Doe
-```{R}
-set.seed(seed)
+```{r}
+set.seed(settings$seed)
 
 X <- model.matrix(settings$fm_model, df_sample)
 
@@ -280,20 +295,92 @@ gusto_collector$Doe$pred_br$pm_mk <- predict_pm(t(settings$Doe), reg_br$beta, re
 gusto_collector$Doe$pred_br$cri <- plogis(c(qlogis(gusto_collector$Doe$pred_br$pe)) + c(-1.96, 1.96) * tmp$sd_eta)
 
 
+# ---- Self-projection PM (and complete MacKay PM) for Sam Doe, all Laplace priors ----
+# Self-projection: regress the prior's posterior-mean soft-labels on the design
+# matrix, then predict Sam Doe; MacKay is the closed-form logit-normal mean.
+doe_x <- t(settings$Doe)
+.self_proj_doe <- function(pm_soft) {
+  fit_pp <- suppressWarnings(glm.fit(X, pm_soft, family = binomial()))
+  as.numeric(plogis(settings$Doe %*% fit_pp$coefficients))
+}
+# Flat
+gusto_collector$Doe$pred_f$pm_mk  <- predict_pm(doe_x, coef(reg_f),  vcov(reg_f),  "mackay")
+gusto_collector$Doe$pred_f$pm_pp  <- .self_proj_doe(df_sample$pred_pm_f)
+# Jeffreys
+gusto_collector$Doe$pred_j$pm_pp  <- .self_proj_doe(df_sample$pred_pm_j)
+# log-F(2,2)
+gusto_collector$Doe$pred_lf$pm_mk <- predict_pm(doe_x, reg_lf$coefficients, reg_lf$vcov, "mackay")
+gusto_collector$Doe$pred_lf$pm_pp <- .self_proj_doe(df_sample$pred_pm_lf)
+# Bayesian ridge
+gusto_collector$Doe$pred_br$pm_pp <- .self_proj_doe(df_sample$pred_pm_br)
+
+
+# ---- MCMC Bayesian Ridge (exact, no-Laplace reference) ----
+# Fit the hand-written Stan ridge on the development sample, then summarise the
+# posterior on the ORIGINAL coefficient scale (back-transformed from the
+# standardized fit) and compute Sam Doe's plug-in (PE), posterior-mean (PM)
+# risk, and 95% credible interval from the eta draws.
+{
+  Xn  <- X[, -1, drop = FALSE]
+  ctr <- colMeans(Xn)
+  sds <- apply(Xn, 2, sd); sds[sds == 0 | !is.finite(sds)] <- 1
+  Xs  <- sweep(sweep(Xn, 2, ctr, "-"), 2, sds, "/")
+
+  fit_brm <- rstan::sampling(
+    get_ridge_stanmodel(),
+    data    = list(n = nrow(Xs), p = ncol(Xs), X = Xs, y = as.integer(df_sample$Y)),
+    chains  = 4, iter = 2000, cores = 1, refresh = 0, seed = settings$seed,
+    pars    = c("alpha", "beta", "tau"),
+    control = list(adapt_delta = 0.95, max_treedepth = 12)
+  )
+  dr  <- rstan::extract(fit_brm, pars = c("alpha", "beta"))
+  a_d <- dr$alpha                                   # D draws of intercept (std scale)
+  b_d <- dr$beta                                    # D x p draws of slopes (std scale)
+
+  # Back-transform each draw to the original scale:
+  #   beta_orig_j    = beta_std_j / sd_j
+  #   intercept_orig = alpha - sum_j beta_std_j * ctr_j / sd_j
+  bo_d <- sweep(b_d, 2, sds, "/")
+  a0_d <- a_d - as.numeric(b_d %*% (ctr / sds))
+  cf_d <- cbind(a0_d, bo_d)                          # D x (p+1): intercept, X1..Xp
+  cf_mat <- cbind(estimate = colMeans(cf_d), SE = apply(cf_d, 2, sd))
+  rownames(cf_mat) <- colnames(X)                    # (Intercept), X1..X7
+  gusto_collector$models$reg_br_mcmc$coefs <- cf_mat
+
+  # Posterior-mean risk for each development-sample individual (for the
+  # shrinkage figure): average plogis(eta) over the draws.
+  eta_samp <- sweep(Xs %*% t(b_d), 2, a_d, "+")      # n x D
+  df_sample$pred_pm_br_mcmc <- rowMeans(plogis(eta_samp))
+
+  # Sam Doe: standardize covariates, form eta draws, summarise.
+  xs_doe  <- (settings$Doe[-1] - ctr) / sds
+  eta_doe <- a_d + as.numeric(b_d %*% xs_doe)        # D draws of eta for Sam Doe
+  gusto_collector$Doe$pred_br_mcmc$pe  <-
+    plogis(mean(a0_d) + sum(colMeans(bo_d) * settings$Doe[-1]))   # plug-in at posterior-mean coefs
+  gusto_collector$Doe$pred_br_mcmc$pm  <- mean(plogis(eta_doe))    # posterior-mean risk
+  gusto_collector$Doe$pred_br_mcmc$cri <-
+    plogis(quantile(eta_doe, c(0.025, 0.975), names = FALSE))      # empirical 95% CrI
+}
+
+
+# glmnet adds its own (unpenalised) intercept and standardizes internally, so we
+# pass predictors WITHOUT the model-matrix intercept column (matches the
+# simulation loop). coef() then returns (Intercept, X1..X7) — no [-2,] needed.
+X_noint <- X[, -1, drop = FALSE]
+
 # ---- Frequentist Ridge (cv.glmnet) — no CrI ----
-reg_rg <- cv.glmnet(X, df_sample$Y, alpha = 0, family = "binomial", type.measure = "deviance")
-gusto_collector$models$reg_rg$coefs <- coef(reg_rg, s = "lambda.min")[-2, ]
+reg_rg <- cv.glmnet(X_noint, df_sample$Y, alpha = 0, family = "binomial", type.measure = "deviance")
+gusto_collector$models$reg_rg$coefs <- coef(reg_rg, s = "lambda.min")[, 1]
 gusto_collector$models$reg_rg$eq <- coef(reg_rg, s = "lambda.min")
-df_sample$pred_ridge_min <- plogis(as.numeric(predict(reg_rg, newx = X, s = "lambda.min")))
-gusto_collector$Doe$pred_rg$pe <- plogis(coef(reg_rg, s = "lambda.min")[-2, ] %*% settings$Doe)
+df_sample$pred_ridge_min <- plogis(as.numeric(predict(reg_rg, newx = X_noint, s = "lambda.min")))
+gusto_collector$Doe$pred_rg$pe <- plogis(coef(reg_rg, s = "lambda.min")[, 1] %*% settings$Doe)
 
 
-# ---- Frequentist LASSO (cv.glmnet) — no CrI ----
-reg_ls <- cv.glmnet(X, df_sample$Y, alpha = 1, family = "binomial", type.measure = "deviance")
-gusto_collector$models$reg_ls$coefs <- coef(reg_ls, s = "lambda.min")[-2, ]
-gusto_collector$models$reg_ls$eq <- coef(reg_ls, s = "lambda.min")
-df_sample$pred_lasso_min <- plogis(as.numeric(predict(reg_ls, newx = X, s = "lambda.min")))
-gusto_collector$Doe$pred_ls$pe <- plogis(coef(reg_ls, s = "lambda.min")[-2, ] %*% settings$Doe)
+# ---- Frequentist LASSO (cv.glmnet) ----
+# LASSO is no longer shown in the coefficients table (replaced by the MCMC
+# ridge), but the fit is retained for the shrinkage visualization (pred_lasso_min).
+reg_ls <- cv.glmnet(X_noint, df_sample$Y, alpha = 1, family = "binomial", type.measure = "deviance")
+df_sample$pred_lasso_min <- plogis(as.numeric(predict(reg_ls, newx = X_noint, s = "lambda.min")))
 
 
 model <- reg_j
@@ -370,26 +457,26 @@ saveRDS(coefs_table_data, file = paste0(res_dir, "gusto_coefs_table.rds"))
 ```{r}
 
 
-lp_pe_f     <- logit(df_sample$pred_pe_f)
-lp_pm_f     <- logit(df_sample$pred_pm_f)
-lp_ridge    <- logit(df_sample$pred_ridge_min)
-lp_lasso    <- logit(df_sample$pred_lasso_min)
-lp_pm_j     <- logit(df_sample$pred_pm_j)
-lp_pm_lf    <- logit(df_sample$pred_pm_lf)
-lp_pm_br    <- logit(df_sample$pred_pm_br)
+lp_pe_f       <- logit(df_sample$pred_pe_f)
+lp_pm_f       <- logit(df_sample$pred_pm_f)
+lp_ridge      <- logit(df_sample$pred_ridge_min)
+lp_pm_br_mcmc <- logit(df_sample$pred_pm_br_mcmc)
+lp_pm_j       <- logit(df_sample$pred_pm_j)
+lp_pm_lf      <- logit(df_sample$pred_pm_lf)
+lp_pm_br      <- logit(df_sample$pred_pm_br)
 
 # Methods are tagged with type (Bayesian PM vs frequentist PE) so the
-# plot can colour them differently — frequentist methods in grey to
-# emphasise that the comparison axis is "PM under different priors",
-# with frequentist regularisers as a non-Bayesian reference.
+# plot can colour them differently — the frequentist ridge plug-in is shown in
+# grey as a non-Bayesian reference; all posterior means (including the exact
+# MCMC ridge) are in the Bayesian-PM colour.
 plot_df <- tibble(
-  `Posterior Mean - flat`       = lp_pm_f,
-  `Posterior Mean - Jeffreys`   = lp_pm_j,
-  `Posterior Mean - log-F`      = lp_pm_lf,
-  `Posterior Mean - Gaussian`   = lp_pm_br,
-  `Plug-in Estimate - Ridge`      = lp_ridge,
-  `Plug-in Estimate - LASSO`      = lp_lasso,
-  lp_pe_f                       = lp_pe_f
+  `Posterior Mean - flat`        = lp_pm_f,
+  `Posterior Mean - Jeffreys`    = lp_pm_j,
+  `Posterior Mean - log-F`       = lp_pm_lf,
+  `Posterior Mean - Gaussian`    = lp_pm_br,
+  `Plug-in Estimate - Ridge`     = lp_ridge,
+  `Posterior Mean - MCMC ridge`  = lp_pm_br_mcmc,
+  lp_pe_f                        = lp_pe_f
 ) %>%
   pivot_longer(-lp_pe_f, names_to = "method", values_to = "lp") %>%
   mutate(
@@ -399,7 +486,7 @@ plot_df <- tibble(
                                        "Posterior Mean - log-F",
                                        "Posterior Mean - Gaussian",
                                        "Plug-in Estimate - Ridge",
-                                       "Plug-in Estimate - LASSO")),
+                                       "Posterior Mean - MCMC ridge")),
     method_type = ifelse(grepl("^Posterior Mean", method),
                          "Bayesian PM", "Frequentist PE")
   )
@@ -422,7 +509,7 @@ plt <- ggplot(plot_df, aes(x = lp_pe_f, y = delta, color = method_type)) +
                                 `Frequentist PE` = "grey55"),
                      guide = "none") +
   facet_wrap(~ method, nrow = 2) +
-  coord_cartesian(ylim = c(-0.5, 0.75)) +
+  coord_cartesian(ylim = c(-1, 2)) +
   theme_minimal(base_size = 10) +
   theme(
     panel.grid.minor = element_blank(),
@@ -483,22 +570,34 @@ plt2
 
 
 
-## Simulation studies
 
+## Simulation setup
 ```{r}
 
-sim <- function() {
+sim <- function(i) {
   out <- c()
 
-  for (n in settings$ns) {
+  # Per-(replicate i, sample-size index j) seeds derived from the master seed
+  # settings$seed. Changing it regenerates every replicate's subsample, glmnet
+  # folds and MCMC draws; the row is reproducible regardless of worker or run
+  # order (required for resuming). Sub-slots: +0 subsample, +1 glmnet folds,
+  # +2 ridge MCMC, +3 lasso MCMC, +4 flat MCMC. Keep settings$seed a modest
+  # integer so the value stays within R's 32-bit integer seed range.
+  sseed <- function(j, s) settings$seed * 1000000L + i * 1000L + j * 100L + s
+
+  for (j in seq_along(settings$ns)) {
+    n <- settings$ns[j]
     preds <- NULL
 
+    set.seed(sseed(j, 0L))                 # training subsample for (i, n)
     ids <- sample(nrow(df_final), n)
     df_samp <- df_final[ids, ]
     df_pop  <- df_final[-ids, ]
 
     mm_samp <- model.matrix(settings$fm_model, df_samp)
     mm_pop  <- model.matrix(settings$fm_model, df_pop)
+
+    set.seed(sseed(j, 1L))                 # modeling RNG (glmnet CV folds)
 
     # --- Unpenalised MLE family ---
     need_mle <- any(c("pe_f", "pm_f", "pm_f_mk", "pm_f_pp", "pm_f_cpp") %in% settings$methods)
@@ -631,19 +730,119 @@ sim <- function() {
       }
     }
 
+    # --- MCMC Bayesian Ridge (static Stan) and Bayesian LASSO (rstanarm) ---
+    # Ridge: fit_ridge_stan() (core.R) fits a hand-written Stan model whose
+    # common shrinkage scale tau is ESTIMATED via a half-Student-t hyperprior
+    # — the faithful Bayesian analogue of mgcv's REML ridge. Predictors are
+    # standardized to training SD = 1 so a single shared tau penalizes all
+    # slopes equally (= mgcv's S = I); the intercept has no prior (flat). The
+    # Stan model is compiled once per worker and reused via rstan::sampling;
+    # the PM is computed from the draws in row-chunks to bound peak RAM.
+    #
+    # LASSO: rstanarm::stan_glm(prior = lasso()) — the standard Park & Casella
+    # Bayesian lasso, precompiled. Its global penalty is given a hyperprior and
+    # ESTIMATED from the data (data-adaptive shrinkage, analogous to CV-tuned
+    # glmnet), so it is hierarchical despite the fixed prior-family call.
+    # prior_intercept = NULL leaves the intercept flat, matching glmnet.
+    #
+    # Both: cores = 1 (parallelism comes from the foreach chunk loop).
+    # Convergence is diagnosed but does NOT gate inclusion: MCMC is always
+    # evaluated on the same replicates as every other method. Excluding
+    # non-converged replicates would give MCMC a cherry-picked evaluation set
+    # (only easy replicates) and inflate its apparent performance. Diagnostics
+    # are returned as an attribute for reporting.
+    need_br_mcmc    <- "pm_br_mcmc"    %in% settings$methods
+    need_lasso_mcmc <- "pm_lasso_mcmc" %in% settings$methods
+    need_f_mcmc     <- "pm_f_mcmc"     %in% settings$methods
+    mcmc_diag <- list()
+
+    if (need_br_mcmc) {
+      res_mcmc <- fit_ridge_stan(mm_samp[, -1, drop = FALSE], df_samp$Y,
+                                 mm_pop[, -1, drop = FALSE],
+                                 seed = sseed(j, 2L))
+      if (!is.null(res_mcmc)) {
+        mcmc_diag$pm_br_mcmc <- res_mcmc[c("rhat_max", "n_diverg", "converged")]
+        preds <- cbind(preds, res_mcmc$pm)
+        colnames(preds)[ncol(preds)] <- "pm_br_mcmc"
+      }
+    }
+
+    if (need_lasso_mcmc) {
+      fit_lasso_mcmc <- tryCatch(
+        rstanarm::stan_glm(
+          settings$fm_model, data = df_samp, family = binomial(),
+          prior            = rstanarm::lasso(autoscale = TRUE),
+          prior_intercept  = NULL,   # flat intercept — matches glmnet
+          cores = 1, chains = 4, iter = 2000, refresh = 0,
+          seed = sseed(j, 3L)
+        ),
+        error = function(e) NULL
+      )
+      if (!is.null(fit_lasso_mcmc)) {
+        rhat_max <- max(fit_lasso_mcmc$stan_summary[, "Rhat"], na.rm = TRUE)
+        n_diverg <- sum(sapply(
+          rstan::get_sampler_params(fit_lasso_mcmc$stanfit, inc_warmup = FALSE),
+          function(sp) sum(sp[, "divergent__"])
+        ))
+        mcmc_diag$pm_lasso_mcmc <- list(rhat_max = rhat_max, n_diverg = n_diverg,
+                                        converged = n_diverg == 0 && rhat_max < 1.01)
+        pm_vec <- colMeans(rstanarm::posterior_epred(fit_lasso_mcmc, newdata = df_pop))
+        preds  <- cbind(preds, pm_vec)
+        colnames(preds)[ncol(preds)] <- "pm_lasso_mcmc"
+      }
+    }
+
+    # Flat-prior MCMC: rstanarm::stan_glm(prior = NULL, prior_intercept = NULL)
+    # gives flat (improper uniform) priors on all coefficients AND the
+    # intercept, so the posterior is proportional to the likelihood. Its
+    # posterior-mean risk is the EXACT flat-prior PM that pm_f approximates via
+    # Laplace (MLE mode + Hessian-based vcov). Comparing pm_f_mcmc vs pm_f
+    # therefore isolates the pure effect of the Laplace approximation, with no
+    # prior differences confounding it.
+    if (need_f_mcmc) {
+      fit_f_mcmc <- tryCatch(
+        rstanarm::stan_glm(
+          settings$fm_model, data = df_samp, family = binomial(),
+          prior            = NULL,   # flat (improper) prior on slopes
+          prior_intercept  = NULL,   # flat (improper) prior on intercept
+          cores = 1, chains = 4, iter = 2000, refresh = 0,
+          seed = sseed(j, 4L)
+        ),
+        error = function(e) NULL
+      )
+      if (!is.null(fit_f_mcmc)) {
+        rhat_max <- max(fit_f_mcmc$stan_summary[, "Rhat"], na.rm = TRUE)
+        n_diverg <- sum(sapply(
+          rstan::get_sampler_params(fit_f_mcmc$stanfit, inc_warmup = FALSE),
+          function(sp) sum(sp[, "divergent__"])
+        ))
+        mcmc_diag$pm_f_mcmc <- list(rhat_max = rhat_max, n_diverg = n_diverg,
+                                    converged = n_diverg == 0 && rhat_max < 1.01)
+        pm_vec <- colMeans(rstanarm::posterior_epred(fit_f_mcmc, newdata = df_pop))
+        preds  <- cbind(preds, pm_vec)
+        colnames(preds)[ncol(preds)] <- "pm_f_mcmc"
+      }
+    }
+
+    # glmnet adds its own (unpenalised) intercept and standardizes internally,
+    # so we pass the predictors WITHOUT the model-matrix intercept column —
+    # mirroring the synthetic sim and avoiding feeding glmnet a constant column.
+    mm_samp_noint <- mm_samp[, -1, drop = FALSE]
+    mm_pop_noint  <- mm_pop[, -1, drop = FALSE]
+
     # --- LASSO ---
     if (any(c("pe_lasso_min", "pe_lasso_1se") %in% settings$methods)) {
-      reg_s <- cv.glmnet(mm_samp, df_samp$Y, family = "binomial",
+      reg_s <- cv.glmnet(mm_samp_noint, df_samp$Y, family = "binomial",
                          type.measure = "deviance")
       if ("pe_lasso_min" %in% settings$methods) {
         preds <- cbind(preds, as.numeric(
-          predict(reg_s, newx = mm_pop, s = "lambda.min", type = "response")
+          predict(reg_s, newx = mm_pop_noint, s = "lambda.min", type = "response")
         ))
         colnames(preds)[ncol(preds)] <- "pe_lasso_min"
       }
       if ("pe_lasso_1se" %in% settings$methods) {
         preds <- cbind(preds, as.numeric(
-          predict(reg_s, newx = mm_pop, s = "lambda.1se", type = "response")
+          predict(reg_s, newx = mm_pop_noint, s = "lambda.1se", type = "response")
         ))
         colnames(preds)[ncol(preds)] <- "pe_lasso_1se"
       }
@@ -651,17 +850,17 @@ sim <- function() {
 
     # --- Ridge ---
     if (any(c("pe_ridge_min", "pe_ridge_1se") %in% settings$methods)) {
-      reg_s <- cv.glmnet(mm_samp, df_samp$Y, alpha = 0, family = "binomial",
+      reg_s <- cv.glmnet(mm_samp_noint, df_samp$Y, alpha = 0, family = "binomial",
                          type.measure = "deviance")
       if ("pe_ridge_min" %in% settings$methods) {
         preds <- cbind(preds, as.numeric(
-          predict(reg_s, newx = mm_pop, s = "lambda.min", type = "response")
+          predict(reg_s, newx = mm_pop_noint, s = "lambda.min", type = "response")
         ))
         colnames(preds)[ncol(preds)] <- "pe_ridge_min"
       }
       if ("pe_ridge_1se" %in% settings$methods) {
         preds <- cbind(preds, as.numeric(
-          predict(reg_s, newx = mm_pop, s = "lambda.1se", type = "response")
+          predict(reg_s, newx = mm_pop_noint, s = "lambda.1se", type = "response")
         ))
         colnames(preds)[ncol(preds)] <- "pe_ridge_1se"
       }
@@ -705,12 +904,13 @@ sim <- function() {
     }
 
     if ("nb" %in% settings$metrics) {
+      scen_prev <- mean(df_pop$Y)
       iter_res$nb <- data.frame()
       for (z in settings$z) {
         nb_term <- df_pop$Y - (1 - df_pop$Y) * z / (1 - z)
         nb0 <- max(0, mean(nb_term))
         values <- sapply(seq_len(ncol(preds)), function(j) {
-          mean((preds[, j] > z) * nb_term) - nb0
+          mean((preds[, j] > z) * nb_term - nb0)/scen_prev   # standardized NB (divided by prevalence)
         })
         iter_res$nb <- rbind(
           iter_res$nb,
@@ -719,55 +919,146 @@ sim <- function() {
       }
     }
 
-    out <- rbind(out, cbind(n = n, do.call(rbind, iter_res)))
+    iter_df <- cbind(n = n, do.call(rbind, iter_res))
+    if (length(mcmc_diag) > 0) {
+      attr(iter_df, "mcmc_diag") <- mcmc_diag
+    }
+    out <- rbind(out, iter_df)
   }
 
-  out
+  cbind(iteration = i, out)
 }
 
 ```
 
 
-
-
+## Simulations
 ```{r}
-n_cores <- NULL
-n_sim   <- settings$n_sim
+n_sim <- settings$n_sim
 
-if (is.null(n_cores)) {
-  no_cores <- min(parallel::detectCores() - 1, n_sim)
+# =========================================================================
+# Resumable checkpointing (mirrors the synthetic sim).
+#
+# The unit of work is a replicate i in 1..n_sim (each does all sample sizes).
+# Every replicate is fully self-seeded (see sim()), so its result is identical
+# regardless of worker / run order — which is what makes resuming safe.
+#
+# Run signature = science-relevant settings + master seed. Match -> RESUME
+# (keep completed replicate files, run only the missing ones). Mismatch / none
+# -> FRESH (wipe dump_dir). Execution-only choices (cores) are excluded.
+# =========================================================================
+rows_dir <- file.path(dump_dir, "reps")
+sig_file <- file.path(dump_dir, "run_signature.rds")
+
+run_signature <- list(
+  methods  = settings$methods, metrics = settings$metrics, ns = settings$ns,
+  n_sim    = settings$n_sim,    logf_m  = settings$logf_m, z  = settings$z,
+  fm_model = paste(deparse(settings$fm_model), collapse = " "),
+  seed     = settings$seed
+)
+resume <- file.exists(sig_file) && identical(readRDS(sig_file), run_signature)
+
+if (resume) {
+  message("Run signature matches ", dump_dir, " -> RESUMING.")
 } else {
-  no_cores <- n_cores
+  message("New/changed run signature -> starting FRESH (clearing ", dump_dir, ").")
+  if (dir.exists(dump_dir)) unlink(dump_dir, recursive = TRUE, force = TRUE)
+  dir.create(rows_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(run_signature, sig_file)
+  saveRDS(settings, file.path(dump_dir, "settings.rds"))
 }
+dir.create(rows_dir, recursive = TRUE, showWarnings = FALSE)
 
-if (no_cores > 1) {
-  cl <- makeCluster(no_cores)
-  registerDoSNOW(cl)
-  parallel::clusterExport(cl, varlist = c("df_final", "settings"))
-  clusterCall(cl, function() source("core.R"))
-  message(paste("Running in PARALLEL on", no_cores, "cores"))
+# Pending = replicates without a completed file, in randomized dispatch order
+# (homogeneous progress + order-independent load). Seeded for a reproducible
+# dispatch order; results are per-replicate deterministic regardless.
+done_files <- list.files(rows_dir, pattern = "^rep_[0-9]+\\.rds$")
+done_idx   <- as.integer(sub("^rep_0*([0-9]+)\\.rds$", "\\1", done_files))
+pending    <- setdiff(seq_len(n_sim), done_idx)
+set.seed(settings$seed)
+pending <- pending[sample(length(pending))]
+message(sprintf("Replicates: %d total, %d done, %d pending.",
+                n_sim, n_sim - length(pending), length(pending)))
+
+# Exactly ONE line is written per replicate processed, so the log line count is
+# a direct progress measure. Run-start / chunk markers go to the console only.
+progress_file <- file.path(dump_dir, "sim_gusto_progress.log")
+message(sprintf("=== run start: %d pending of %d ===", length(pending), n_sim))
+message("Worker progress log: ", progress_file)
+
+if (length(pending) > 0) {
+  chunks     <- split(pending, ceiling(seq_along(pending) / chunk_size))
+  n_chunks   <- length(chunks)
+
+  no_cores <- if (is.null(n_cores)) {
+    min(parallel::detectCores() - 1, n_chunks)
+  } else n_cores
+
+  if (no_cores > 1) {
+    cl <- makeCluster(no_cores)
+    registerDoSNOW(cl)
+    parallel::clusterExport(cl, varlist = c(
+      "df_final", "settings", "sim", "chunks", "n_chunks",
+      "progress_file", "rows_dir"
+    ))
+    clusterCall(cl, function() source("core.R"))
+    message(paste("Running in PARALLEL on", no_cores, "cores,", n_chunks, "chunks"))
+  } else {
+    registerDoSEQ(); cl <- NULL
+    message("Running SEQUENTIALLY")
+  }
+
+  # Per-replicate atomic writes make this resumable; workers return only the
+  # completed indices (results live on disk), keeping master memory flat.
+  done_now <- foreach(
+    ch = seq_len(n_chunks),
+    .combine = c,
+    .packages = c("glmnet", "mvtnorm", "pROC", "brglm2", "rstan", "rstanarm"),
+    .errorhandling = "pass"
+  ) %dopar% {
+    reps <- chunks[[ch]]
+    completed <- integer(0)
+    for (i in reps) {
+      # One line per replicate processed (line count == progress).
+      log_progress(sprintf("replicate %d", i), progress_file)
+      out_i <- tryCatch(
+        sim(i),
+        error = function(e) {
+          log_progress(sprintf("replicate %d ERROR: %s", i, conditionMessage(e)),
+                       progress_file)
+          data.frame(iteration = i, n = NA, metric = NA, method = NA, value = NA,
+                     error_msg = conditionMessage(e), stringsAsFactors = FALSE)
+        }
+      )
+      save_row_atomic(out_i, file.path(rows_dir, sprintf("rep_%06d.rds", i)))
+      completed <- c(completed, i)
+    }
+    completed
+  }
+
+  if (!is.null(cl)) stopCluster(cl)
+  message(sprintf("Completed %d replicates this run.", length(unlist(done_now))))
 } else {
-  registerDoSEQ()
-  cl <- NULL
-  message("Running SEQUENTIALLY in console")
+  message("Nothing pending; all replicates already complete.")
 }
 
-pb <- txtProgressBar(min = 0, max = n_sim, style = 3)
-progress <- function(n) setTxtProgressBar(pb, n)
-opts <- if (interactive()) list(progress = progress) else list()
+# --- Combine all completed replicate files ---
+all_files <- list.files(rows_dir, pattern = "^rep_[0-9]+\\.rds$", full.names = TRUE)
+res <- dplyr::bind_rows(lapply(all_files, readRDS))
+message(sprintf("Combined %d replicate files -> %d result rows.",
+                length(all_files), nrow(res)))
 
-res <- foreach(
-  i = 1:n_sim,
-  .combine = 'rbind',
-  .options.snow = opts,
-  .packages = c("glmnet", "mvtnorm", "pROC", "brglm2")
-) %dorng% {
-  cat(i)
-  cbind(iteration = i, sim())
+# Separate any captured errors (NA metric / error_msg) from the results.
+if ("error_msg" %in% names(res)) {
+  err <- res[!is.na(res$error_msg), , drop = FALSE]
+  if (nrow(err) > 0) {
+    message(sprintf("%d replicate(s) errored; saved to %s.",
+                    length(unique(err$iteration)), file.path(dump_dir, "sim_gusto_errors.rds")))
+    saveRDS(err, file.path(dump_dir, "sim_gusto_errors.rds"))
+  }
+  res <- res[is.na(res$error_msg), , drop = FALSE]
+  res$error_msg <- NULL
 }
-
-close(pb)
-if (!is.null(cl)) stopCluster(cl)
 
 res$metric <- as.factor(res$metric)
 res$method <- as.factor(res$method)
@@ -790,6 +1081,40 @@ if ("cal_slp" %in% settings$metrics) {
   }
 }
 
+# MCMC hard-failure rate (fit crashed entirely — tryCatch returned NULL)
+# Uses n_distinct(iteration) so row-count differences across metrics never mislead.
+mcmc_methods <- c("pm_br_mcmc", "pm_lasso_mcmc", "pm_f_mcmc")
+
+n_iter_per_n <- res %>%
+  group_by(n) %>%
+  summarise(n_expected = n_distinct(iteration), .groups = "drop")
+
+mcmc_conv <- res %>%
+  filter(as.character(method) %in% mcmc_methods) %>%
+  group_by(method, n) %>%
+  summarise(n_present = n_distinct(iteration), .groups = "drop") %>%
+  left_join(n_iter_per_n, by = "n") %>%
+  mutate(n_failed   = n_expected - n_present,
+         pct_failed = round(100 * n_failed / n_expected, 1))
+
+# Also add rows for MCMC methods with zero presence (crashed every replicate)
+for (m in mcmc_methods) {
+  missing_ns <- setdiff(n_iter_per_n$n, mcmc_conv$n[mcmc_conv$method == m])
+  if (length(missing_ns) > 0) {
+    mcmc_conv <- bind_rows(mcmc_conv,
+      n_iter_per_n %>% filter(n %in% missing_ns) %>%
+        mutate(method = m, n_present = 0L,
+               n_failed = n_expected, pct_failed = 100))
+  }
+}
+
+if (any(mcmc_conv$n_failed > 0)) {
+  cat("\nMCMC hard failures (fit crashed — excluded from results):\n")
+  print(as.data.frame(mcmc_conv[mcmc_conv$n_failed > 0, ]), row.names = FALSE)
+} else {
+  cat("\nMCMC: no hard failures (all replicates returned predictions).\n")
+}
+
 saveRDS(res, file = file.path(res_dir, "sim_gusto_results.rds"))
 
 ```
@@ -798,37 +1123,23 @@ saveRDS(res, file = file.path(res_dir, "sim_gusto_results.rds"))
 
 
 ## Plots
-
 ```{r}
 
 res <- readRDS(file.path(res_dir, "sim_gusto_results.RDS"))
 
-# pmpeeff <- c()
-# for(z in paste0("nb",settings$z)){
-#   A <- (res |> filter(n==500 & method %in% c("pe_f", "pe_j", "pe_lf", "pe_br") & metric==z) |> select(value))[[1]]
-#   B <- (res |> filter(n==500 & method %in% c("pm_f", "pm_j", "pm_lf", "pm_br") & metric==z) |> select(value))[[1]]
-#   C <- (res |> filter(n==1000 & method %in% c("pe_f", "pe_j", "pe_lf", "pe_br") & metric==z) |> select(value))[[1]]
-#   
-#   pmpeeff <- c(pmpeeff, mean(B-A)/mean(C-A))
-# }
-# 
-# saveRDS(pmpeeff, file.path(res_dir,"gusto_pmpeeff.rds"))
+# Switch: if TRUE, the main plot is anchored to the plug-in flat-prior method
+# (pe_f) as reference — values shifted to pe_f's own mean/median, whiskers are
+# the paired difference vs pe_f. Set FALSE for the plain absolute plot.
+rel_to_pe_f <- FALSE
 
+# Switch: if TRUE, the PM-computation figure is anchored to Gauss-Hermite
+# quadrature ("exact") as the reference — each computation method is shown as a
+# paired difference vs exact, positioned at exact's own mean/median value.
+comp_rel_to_exact <- FALSE
 
-df_pmpeeff <- data.frame(z=double(), epv=integer(), method=character(), nb=double())
-for(z_ in settings$z){
-  for(method_ in c("pe","pm")){
-    for(n_ in c(500,1000)){
-      A <- mean((res |> filter(n==n_ & method %in% paste0(method_, c("_f","_j","_lf","_br")) & metric==paste0("nb",z_)) |> select(value))[[1]])
-      df_pmpeeff <- rbind(df_pmpeeff, data.frame(z=z_, n=n_, method=method_, nb=A))
-    }
-  }
-}
-
-nms <- apply(df_pmpeeff, 1, function(x){sprintf("%s|%s|%s", x['z'],x['n'],x['method'])})
-rownames(df_pmpeeff) <- gsub(" ", "", nms)
-
-saveRDS(df_pmpeeff, file.path(res_dir,"gusto_pmpeeff.rds"))
+default_metric_order <- c("mse", "cstat", "oe_ratio", "cal_slp"
+                          #,"nb0.02", "nb0.05", "nb0.1"
+                          )
 
 
 
@@ -886,8 +1197,12 @@ method_registry <- tibble::tribble(
   "pm_br_pp",      "PM (Bayes. ridge, self-proj.)",           "#E07B00",  18,
   "pm_br_cpp",     "PM (Bayes. ridge, constr. self-proj.)",   "#E07B00",  18,
 
-  "pe_ridge_min",  "Ridge (CV-min)",                       "#AAAAAA",  2,
-  "pe_lasso_min",  "LASSO (CV-min)",                       "#AAAAAA",  6,
+  "pe_ridge_min",  "PE (Ridge)",                       "#AAAAAA",  2,
+  "pe_lasso_min",  "PE (LASSO)",                       "#AAAAAA",  6,
+
+  "pm_br_mcmc",    "PM (MCMC ridge)",                      "#666666",  8,
+  "pm_lasso_mcmc", "PM (MCMC LASSO)",                      "#666666",  8,
+  "pm_f_mcmc",     "PM (MCMC flat)",                       "#666666",  7,
 )
 
 
@@ -904,11 +1219,10 @@ metric_labels <- c(
   cal_slp  = "Calibration slope",
   nb0.02   = "sNB (z = 0.02)",
   nb0.05   = "sNB (z = 0.05)",
-  nb0.10    = "sNB (z = 0.10)"
+  nb0.1    = "sNB (z = 0.10)"
 )
 
-default_metric_order <- c("mse", "cstat", "oe_ratio", "cal_slp",
-                          "nb0.02", "nb0.05", "nb0.1")
+
 
 metric_reference <- list(
   cal_slp  = 1,
@@ -923,14 +1237,20 @@ metric_reference <- list(
 # vector (default: c(0.25, 0.75)).
 # To override for a particular plot, pass a modified list to the
 # `summary_spec` argument of build_plot()/build_computation_plot().
+# Whisker type for the mean-based metrics: "se" (mean +/- SE = sd/sqrt(n)) or
+# "sd" (mean +/- SD). Flip this one value and RE-RUN this whole chunk (it must
+# be re-evaluated before build_plot() is called). oe_ratio / cal_slp stay on
+# median + IQR ("quant") because they are heavy-tailed.
+whisker_type <- "sd"
+
 metric_summary_spec <- list(
-  mse      = list(center = "mean",   range = "sd"),
-  cstat    = list(center = "mean",   range = "sd"),
+  mse      = list(center = "mean",   range = whisker_type),
+  cstat    = list(center = "mean",   range = whisker_type),
   oe_ratio = list(center = "median", range = "quant"),
   cal_slp  = list(center = "median", range = "quant"),
-  nb0.02   = list(center = "mean",   range = "sd"),
-  nb0.05   = list(center = "mean",   range = "sd"),
-  nb0.1    = list(center = "mean",   range = "sd")
+  nb0.02   = list(center = "mean",   range = whisker_type),
+  nb0.05   = list(center = "mean",   range = whisker_type),
+  nb0.1    = list(center = "mean",   range = whisker_type)
 )
 
 # ---- Centrality / whisker helpers ----
@@ -952,6 +1272,7 @@ compute_lower <- function(x, spec) {
   x <- x[!is.na(x)]
   if (length(x) < 2) return(NA_real_)
   switch(spec,
+         se = mean(x) - sd(x)/sqrt(length(x)),
          sd    = mean(x) - sd(x),
          quant = unname(quantile(x, q_range[1], na.rm = TRUE)),
          stop("Unknown range spec: ", spec))
@@ -961,6 +1282,7 @@ compute_upper <- function(x, spec) {
   x <- x[!is.na(x)]
   if (length(x) < 2) return(NA_real_)
   switch(spec,
+         se = mean(x) + sd(x)/sqrt(length(x)),
          sd    = mean(x) + sd(x),
          quant = unname(quantile(x, q_range[2], na.rm = TRUE)),
          stop("Unknown range spec: ", spec))
@@ -989,7 +1311,29 @@ res_plot <- res %>%
 build_plot <- function(data, figure_title = NULL,
                        method_order  = default_method_order,
                        metric_order  = default_metric_order,
-                       summary_spec  = metric_summary_spec) {
+                       summary_spec  = metric_summary_spec,
+                       ref_method    = NULL) {
+
+  # Optional reference mode: express every metric as a PAIRED difference from
+  # `ref_method` (e.g. "pe_f" = plug-in flat prior). For each replicate, n and
+  # metric we subtract that replicate's own ref value, so the reference method
+  # sits exactly at 0 and the whiskers reflect within-replicate variation of the
+  # difference (much tighter and more interpretable than differencing means).
+  rel_mode <- !is.null(ref_method)
+  if (rel_mode) {
+    if (!any(as.character(data$method) == ref_method)) {
+      warning("ref_method '", ref_method, "' not in data; plotting absolute values.")
+      rel_mode <- FALSE
+    } else {
+      ref_vals <- data %>%
+        filter(as.character(method) == ref_method) %>%
+        select(iteration, n, metric, .ref_value = value)
+      data <- data %>%
+        inner_join(ref_vals, by = c("iteration", "n", "metric")) %>%
+        mutate(value = value - .ref_value) %>%
+        select(-.ref_value)
+    }
+  }
 
   # Method ordering. Keep only methods that (a) appear in the data AND
   # (b) are known to method_labels/colors/shapes AND (c) are either point
@@ -997,11 +1341,15 @@ build_plot <- function(data, figure_title = NULL,
   # _cpp) are automatically excluded from the main plot — they belong on
   # the dedicated computation-comparison plot. This isolates the prior
   # comparison from the deployment-method comparison.
+  comp_suffixes <- c("mk", "pp", "cpp")  # Laplace approximation variants — excluded from main plot
   is_main_plot_method <- function(k) {
     parts <- strsplit(k, "_", fixed = TRUE)[[1]]
     if (length(parts) < 1) return(FALSE)
     if (parts[1] == "pe") return(TRUE)
-    if (parts[1] == "pm") return(length(parts) <= 2)  # pm_<prior>, no comp suffix
+    if (parts[1] == "pm") {
+      if (length(parts) <= 2) return(TRUE)
+      return(!parts[length(parts)] %in% comp_suffixes)  # allow e.g. pm_br_mcmc
+    }
     TRUE  # any other prefix (e.g. user-added) passes through
   }
   avail <- unique(as.character(data$method))
@@ -1038,6 +1386,31 @@ build_plot <- function(data, figure_title = NULL,
     ) %>%
     select(metric, method, n, center, lo, hi)
 
+  # In reference mode the values are paired differences (ref_method at 0). Shift
+  # every panel UP by the reference method's own centre (its mean/median on the
+  # original scale), so the reference sits at its true value rather than 0 and
+  # the whole panel reads on the metric's natural scale — while the whiskers
+  # remain the tight paired-difference whiskers.
+  if (rel_mode) {
+    ref_center_df <- ref_vals %>%
+      mutate(mkey       = names(metric_labels)[match(as.character(metric), metric_labels)],
+             metric_chr = as.character(metric)) %>%
+      group_by(metric_chr, n) %>%
+      summarise(ref_center = compute_center(
+                  .ref_value, get_summary_spec(first(mkey), summary_spec)$center),
+                .groups = "drop")
+    agg <- agg %>%
+      mutate(metric_chr = as.character(metric)) %>%
+      left_join(ref_center_df, by = c("metric_chr", "n")) %>%
+      mutate(center = center + ref_center,
+             lo     = lo + ref_center,
+             hi     = hi + ref_center) %>%
+      select(-metric_chr, -ref_center)
+  }
+
+  # Guide lines: the metrics' natural targets (cal_slp = 1, oe_ratio = 1) in BOTH
+  # modes. After the shift above, the reference-mode axis is on the metric's own
+  # scale, so y = 1 is the correct calibration target (not 0, not the ref value).
   ref_df <- data.frame(
     metric_key = names(metric_reference),
     yint       = unlist(metric_reference)
@@ -1068,7 +1441,9 @@ build_plot <- function(data, figure_title = NULL,
                        breaks = method_order, drop = FALSE, name = "Method") +
     labs(
       title    = NULL,
-      subtitle = NULL,
+      subtitle = if (rel_mode)
+        paste0("Whiskers = paired difference vs ", method_labels[ref_method],
+               " (positioned on the metric's own scale)") else NULL,
       x = "Training sample size",
       y = NULL
     ) +
@@ -1100,11 +1475,13 @@ build_plot <- function(data, figure_title = NULL,
   list(plot=p, data=agg)
 }
 
-fig <- build_plot(res_plot, NULL)
+fig <- build_plot(res_plot, NULL,
+                  ref_method = if (rel_to_pe_f) "pe_f" else NULL)
 print(fig$plot)
 
-# Save
-ggsave(paste0(res_dir, "sim_gusto_main.png"), fig$plot, width = 9, height = 14, dpi = 200)
+# Save (separate filename in reference mode so it doesn't overwrite the absolute plot)
+main_png <- "sim_gusto_main.png"
+ggsave(paste0(res_dir, main_png), fig$plot, width = 9, height = 14, dpi = 200)
 
 
 # =========================================================================
@@ -1170,11 +1547,15 @@ get_main_plot_ylims <- function(data,
   # y-limits computed across all PM variants, its rows become wider than
   # the corresponding rows of the main plot, and the visual comparison
   # "loss in PM accuracy vs difference between priors" is distorted.
+  comp_suffixes <- c("mk", "pp", "cpp")
   is_main_plot_method <- function(k) {
     parts <- strsplit(k, "_", fixed = TRUE)[[1]]
     if (length(parts) < 1) return(FALSE)
     if (parts[1] == "pe") return(TRUE)
-    if (parts[1] == "pm") return(length(parts) <= 2)
+    if (parts[1] == "pm") {
+      if (length(parts) <= 2) return(TRUE)
+      return(!parts[length(parts)] %in% comp_suffixes)
+    }
     TRUE
   }
   avail <- unique(as.character(data$method))
@@ -1221,7 +1602,8 @@ main_ylims <- main_ylims %>%
 build_computation_plot <- function(data, figure_title = NULL,
                                    metric_order  = default_metric_order,
                                    summary_spec  = metric_summary_spec,
-                                   y_limits      = NULL) {
+                                   y_limits      = NULL,
+                                   ref_comp      = NULL) {
 
   pm_keys <- unique(as.character(data$method))
   pm_keys <- pm_keys[grepl("^pm_", pm_keys)]
@@ -1256,6 +1638,23 @@ build_computation_plot <- function(data, figure_title = NULL,
   data$metric_key <- names(metric_labels)[match(as.character(data$metric),
                                                 metric_labels)]
 
+  # Reference mode: express each computation as a PAIRED difference from the
+  # reference computation (ref_comp, e.g. "exact" = Gauss-Hermite quadrature),
+  # within each replicate x n x metric x family. The reference then sits at 0;
+  # we shift it back to its own centre below so the panel reads on the metric's
+  # natural scale while the whiskers stay the tight paired-difference whiskers.
+  rel_mode <- !is.null(ref_comp) && any(as.character(data$computation) == ref_comp)
+  if (rel_mode) {
+    ref_vals <- data %>%
+      filter(as.character(computation) == ref_comp) %>%
+      select(iteration, n, metric, metric_key, family, .ref = value)
+    data <- data %>%
+      inner_join(select(ref_vals, iteration, n, metric, family, .ref),
+                 by = c("iteration", "n", "metric", "family")) %>%
+      mutate(value = value - .ref) %>%
+      select(-.ref)
+  }
+
   agg <- data %>%
     group_by(metric, metric_key, family, computation, n) %>%
     summarise(
@@ -1267,6 +1666,22 @@ build_computation_plot <- function(data, figure_title = NULL,
     ) %>%
     select(metric, family, computation, n, center, lo, hi)
 
+  # Shift each (metric, family, n) panel up by the reference computation's own
+  # centre, so "exact" sits at its true mean/median rather than 0.
+  if (rel_mode) {
+    ref_center_df <- ref_vals %>%
+      group_by(metric, family, n) %>%
+      summarise(ref_center = compute_center(
+                  .ref, get_summary_spec(first(metric_key), summary_spec)$center),
+                .groups = "drop")
+    agg <- agg %>%
+      left_join(ref_center_df, by = c("metric", "family", "n")) %>%
+      mutate(center = center + ref_center,
+             lo     = lo + ref_center,
+             hi     = hi + ref_center) %>%
+      select(-ref_center)
+  }
+
   ref_df <- data.frame(
     metric_key = names(metric_reference),
     yint       = unlist(metric_reference)
@@ -1276,8 +1691,11 @@ build_computation_plot <- function(data, figure_title = NULL,
     filter(!is.na(metric)) %>%
     select(metric, yint)
 
+  # In reference mode the scale is shifted/differenced, so the absolute main-plot
+  # y-limits no longer apply — let panels free-scale to reveal the (small)
+  # computation differences.
   agg_anchors <- NULL
-  if (!is.null(y_limits)) {
+  if (!is.null(y_limits) && !rel_mode) {
     families_present <- levels(droplevels(agg$family))
     ns_present       <- unique(agg$n)
     base_grid <- expand.grid(
@@ -1333,7 +1751,9 @@ build_computation_plot <- function(data, figure_title = NULL,
                        drop = FALSE, name = "Computation") +
     labs(
       title    = NULL,
-      subtitle = NULL,
+      subtitle = if (rel_mode)
+        paste0("Whiskers = paired difference vs ", computation_labels[ref_comp],
+               " (positioned on the metric's own scale)") else NULL,
       x = "Training sample size",
       y = NULL
     ) +
@@ -1370,16 +1790,568 @@ build_computation_plot <- function(data, figure_title = NULL,
   p
 }
 
+
+comp_metric_order <- c(default_metric_order, "nb0.02", "nb0.05", "nb0.1")
 fig_comp <- build_computation_plot(
   res_plot,
   NULL,
-  y_limits = main_ylims
+  metric_order = comp_metric_order,
+  y_limits = if (comp_rel_to_exact) NULL else main_ylims,
+  ref_comp = if (comp_rel_to_exact) "exact" else NULL
 )
 print(fig_comp)
 
-ggsave(paste0(res_dir,"sim_gusto_PM.png"), fig_comp, width = 12, height = 14, dpi = 200)
+# Separate filename in reference mode so it doesn't overwrite the absolute plot.
+comp_png <- "sim_gusto_PM.png"
+ggsave(paste0(res_dir, comp_png), fig_comp, width = 12, height = 14, dpi = 200)
 
 
 
 ```
 
+
+## NB table
+```{r nb-pm-pe-summary}
+
+df_pmpeeff <- data.frame(z=double(), epv=integer(), method=character(), nb=double())
+for(z_ in settings$z){
+  for(method_ in c("pe","pm")){
+    for(n_ in c(500,1000)){
+      A <- mean((res |> filter(n==n_ & method %in% paste0(method_, c("_f","_j","_lf","_br")) & metric==paste0("nb",z_)) |> select(value))[[1]])
+      df_pmpeeff <- rbind(df_pmpeeff, data.frame(z=z_, n=n_, method=method_, nb=A))
+    }
+  }
+}
+
+nms <- apply(df_pmpeeff, 1, function(x){sprintf("%s|%s|%s", x['z'],x['n'],x['method'])})
+rownames(df_pmpeeff) <- gsub(" ", "", nms)
+
+saveRDS(df_pmpeeff, file.path(res_dir,"gusto_pmpeeff.rds"))
+
+
+# =========================================================================
+# Summary: net-benefit difference between PM and PE, by prior (PAIRED)
+#
+# For each Bayesian prior family (flat / Jeffreys / log-F / Bayesian ridge),
+# pm_<prior> and pe_<prior> are evaluated on the SAME resampled data within
+# each replicate, so the NB difference pm - pe is PAIRED. We report the mean
+# paired difference and its Monte Carlo SE (sd of the per-replicate differences
+# / sqrt(n_rep)), by prior, training size (n), and NB threshold (z). Pairing
+# isolates the PM-vs-PE effect and gives a much tighter SE than comparing the
+# two marginal means. NB only for now; other metrics extend the same way.
+# =========================================================================
+priors_nb  <- c(f = "Flat", j = "Jeffreys", lf = "log-F", br = "Bayesian ridge")
+nb_metrics <- grep("^nb", unique(as.character(res$metric)), value = TRUE)
+
+nb_pm_pe_diff <- res %>%
+  filter(as.character(metric) %in% nb_metrics,
+         as.character(method) %in% c(paste0("pe_", names(priors_nb)),
+                                     paste0("pm_", names(priors_nb)))) %>%
+  mutate(method    = as.character(method),
+         estimator = ifelse(startsWith(method, "pm_"), "pm", "pe"),
+         prior     = sub("^p[me]_", "", method)) %>%
+  select(iteration, n, metric, prior, estimator, value) %>%
+  tidyr::pivot_wider(names_from = estimator, values_from = value) %>%
+  filter(!is.na(pm), !is.na(pe)) %>%                 # keep only complete pairs
+  mutate(diff = pm - pe) %>%
+  group_by(prior, n, metric) %>%
+  summarise(
+    n_rep          = dplyr::n(),
+    mean_pe        = mean(pe),
+    se_pe          = sd(pe) / sqrt(n_rep),           # MC SE of mean NB(PE)
+    mean_pm        = mean(pm),
+    se_pm          = sd(pm) / sqrt(n_rep),           # MC SE of mean NB(PM)
+    mean_diff      = mean(diff),                     # mean paired PM - PE
+    se_diff        = sd(diff) / sqrt(n_rep),         # MC SE of the mean diff (paired)
+    prop_pm_higher = mean(diff > 0),                 # fraction of reps with NB(PM) > NB(PE)
+    .groups        = "drop"
+  ) %>%
+  mutate(prior_label = unname(priors_nb[prior]),
+         z           = as.numeric(sub("^nb", "", metric)),
+         # % improvement of PM over PE, based on the mean NB. Taken relative to
+         # |mean_pe| so the sign stays meaningful when NB is negative (for
+         # mean_pe > 0 this is just the usual (pm - pe)/pe). Special case: if PE
+         # is non-beneficial (mean_pe <= 0) but PM is beneficial (mean_pm > 0),
+         # PM turns a useless/harmful model into a useful one -> report Inf.
+         # A zero PE baseline with non-positive PM is undefined -> NA.
+         pct_improvement = dplyr::case_when(
+           mean_pe <= 0 & mean_pm > 0 ~ Inf,
+           mean_pe == 0               ~ NA_real_,
+           TRUE                       ~ 100 * (mean_pm - mean_pe) / abs(mean_pe)
+         )) %>%
+  arrange(match(prior, names(priors_nb)), n, z) %>%
+  select(prior, prior_label, n, z, n_rep, mean_pe, se_pe, mean_pm, se_pm,
+         mean_diff, se_diff, prop_pm_higher, pct_improvement)
+
+# (The PM-vs-doubling-n comparison and its bootstrap CI were removed; the
+# posterior-mean gain is now expressed via the equivalent sample size n*,
+# computed below.) nb_pm_pe_diff is complete above.
+saveRDS(nb_pm_pe_diff, file = file.path(res_dir, "gusto_nb_pm_pe_diff.rds"))
+
+# --- Learning-curve n*: PE training size matching PM's net benefit ---------
+# NB_inf is the candidate model's net-benefit CEILING, estimated directly by
+# fitting the candidate model to the FULL cohort and evaluating it there with
+# the same (standardized) net-benefit formula used in the simulation. Because
+# the priors are negligible at this sample size, this single MLE fit is the
+# shared asymptote for all priors (and PE = PM in the limit), so NB_inf depends
+# only on the threshold z, not the prior. NOTE: the simulation reports
+# STANDARDIZED NB (raw NB divided by prevalence); NB_inf must use the SAME scale,
+# so we divide by the population prevalence here too.
+reg_pop  <- glm(settings$fm_model, data = df_final, family = binomial())
+p_pop    <- predict(reg_pop, newdata = df_final, type = "response")
+prev_pop <- mean(df_final$Y)
+nb_inf_tbl <- data.frame(
+  z      = settings$z,
+  nb_inf = vapply(settings$z, function(zz) {
+    nb_term <- df_final$Y - (1 - df_final$Y) * zz / (1 - zz)
+    nb0     <- max(0, mean(nb_term))
+    (mean((p_pop > zz) * nb_term - nb0)) / prev_pop   # standardized NB, matching the sim scale
+  }, numeric(1))
+)
+saveRDS(nb_inf_tbl, file.path(res_dir, "gusto_nb_inf.rds"))
+
+nb_pm_pe_diff <- nb_pm_pe_diff %>% left_join(nb_inf_tbl, by = "z")
+
+# Inverse-power learning curve (Figueroa): NB(n) = NB_inf - b * n^c.
+# With NB_inf fixed (above), the decay exponent c is the slope of
+#   log(NB_inf - NB_PE(n)) = log b + c * log n
+# fit over the three sizes per (prior, z). Guard: if a cell's c is >= 0 or
+# non-finite (MC noise on 3 points), fall back to c = -1 (the 1/n excess-risk
+# rate for a parametric model).
+c_fit <- nb_pm_pe_diff %>%
+  group_by(prior, z) %>%
+  summarise(c_exp = {
+      g <- nb_inf - mean_pe                       # gap to ceiling at each n
+      ok <- is.finite(g) & g > 0
+      if (sum(ok) >= 2) unname(coef(lm(log(g[ok]) ~ log(n[ok])))[2]) else NA_real_
+    }, .groups = "drop") %>%
+  mutate(c_exp = ifelse(is.finite(c_exp) & c_exp < 0, c_exp, -1))
+
+# n* = anchored power-law regret ratio: PE's curve forced through its OBSERVED
+# point at n0 with exponent c, so
+#   n* = n0 * [ (NB_inf - NB_PM(n0)) / (NB_inf - NB_PE(n0)) ]^(1/c).
+# Reduces to n0 * (NB_inf - NB_PE) / (NB_inf - NB_PM) when c = -1, and is
+# sign-consistent with ΔNB for any c < 0 (n* > n0 iff PM beats PE at n0).
+nb_pm_pe_diff <- nb_pm_pe_diff %>%
+  left_join(c_fit, by = c("prior", "z")) %>%
+  mutate(nstar = dplyr::case_when(
+                   (nb_inf - mean_pm) <= 0 ~ Inf,        # PM at/above ceiling
+                   (nb_inf - mean_pe) <= 0 ~ NA_real_,   # PE at/above ceiling at n0 (noise)
+                   TRUE ~ n * ((nb_inf - mean_pm) / (nb_inf - mean_pe))^(1 / c_exp)))
+
+# --- Clean manuscript table -----------------------------------------------
+# Thresholds become columns (wide format); SEs dropped for readability.
+# Rows: prior x n, sorted by prior. The four priors carry the full PE / PM /
+# ΔNB / n* comparison. The two single-prediction comparators (frequentist ridge
+# = plug-in only; MCMC ridge = posterior mean only) have NO PE-vs-PM pair, so
+# only one of PE/PM is filled and ΔNB / n* are left empty (NA -> blank); they
+# sit at the bottom of the table.
+
+nb_zvals   <- sort(unique(nb_pm_pe_diff$z))
+nb_zlabels <- sprintf("z=%.2f", nb_zvals)
+
+# Single-prediction comparators: one NB each, placed in PE (plug-in ridge) or
+# PM (posterior-mean MCMC ridge); the other estimate, ΔNB and n* stay NA.
+comparator_methods <- c(pe_ridge_min = "Ridge (CV-min)",
+                        pm_br_mcmc   = "Bayesian ridge (MCMC)")
+comp_long <- res %>%
+  filter(as.character(metric) %in% nb_metrics,
+         as.character(method) %in% names(comparator_methods),
+         !is.na(value)) %>%
+  mutate(method = as.character(method),
+         z      = as.numeric(sub("^nb", "", metric))) %>%
+  group_by(method, n, z) %>%
+  summarise(mean_nb = mean(value), .groups = "drop") %>%
+  mutate(prior_label = unname(comparator_methods[method]),
+         mean_pe   = ifelse(startsWith(method, "pe_"), mean_nb, NA_real_),
+         mean_pm   = ifelse(startsWith(method, "pm_"), mean_nb, NA_real_),
+         mean_diff = NA_real_,
+         nstar     = NA_real_) %>%
+  select(prior_label, n, z, mean_pe, mean_pm, mean_diff, nstar)
+
+# Prior ordering: the four priors first (priors_nb order), comparators last.
+prior_label_levels <- c(unname(priors_nb), unname(comparator_methods))
+
+nb_long <- bind_rows(
+  nb_pm_pe_diff %>% select(prior_label, n, z, mean_pe, mean_pm, mean_diff, nstar),
+  comp_long
+) %>%
+  mutate(prior_label = factor(prior_label, levels = prior_label_levels)) %>%
+  arrange(n, prior_label, z)
+
+nb_table <- nb_long %>%
+  tidyr::pivot_wider(
+    id_cols     = c(n, prior_label),
+    names_from  = z,
+    values_from = c(mean_pe, mean_pm, mean_diff, nstar),
+    names_glue  = "{.value}__{z}"
+  ) %>%
+  arrange(n, prior_label)
+
+# Re-order columns: n, Prior, then per threshold PE / PM / ΔNB / n*
+ordered_cols <- c("n", "prior_label")
+for (zv in nb_zvals) {
+  ordered_cols <- c(ordered_cols,
+    paste0("mean_pe__",   zv),
+    paste0("mean_pm__",   zv),
+    paste0("mean_diff__", zv),
+    paste0("nstar__",     zv))
+}
+nb_table <- nb_table[, ordered_cols]
+
+# Round NB-scale columns to 4 dp; n* to nearest integer (NA stays NA -> blank)
+num_cols   <- setdiff(colnames(nb_table), c("n", "prior_label"))
+nstar_cols <- grep("^nstar__", num_cols, value = TRUE)
+other_cols <- setdiff(num_cols, nstar_cols)
+nb_table[, other_cols] <- lapply(nb_table[, other_cols], function(x) round(x, 4))
+nb_table[, nstar_cols] <- lapply(nb_table[, nstar_cols], function(x) round(x, 0))
+
+kable(nb_table,
+      col.names = c("Prior", "n",
+                    rep(c("PE", "PM", "ΔNB", "n*"), length(nb_zvals))),
+      caption   = "GUSTO: net benefit by prior and training size, with PE-equivalent sample size n* (frequentist and MCMC ridge are single-prediction comparators)")
+
+saveRDS(list(nb_table = nb_table, zvals = nb_zvals, zlabels = nb_zlabels),
+        file = file.path(res_dir, "gusto_nb_table.rds"))
+```
+
+
+## Effective sample size of the posterior mean (relative efficiency)
+```{r nstar-learning-curve, echo = FALSE, message = FALSE, warning = FALSE}
+# =========================================================================
+# How large a training set would the plug-in (PE) need to match the net
+# benefit the posterior mean (PM) already achieves at size n0?
+#
+# NB_inf is the candidate model's net-benefit ceiling, estimated directly from
+# the full cohort (gusto_nb_inf.rds, NB-summary chunk); prior-independent (one
+# per threshold). The inverse-power learning curve (Figueroa) is
+#   NB(n) = NB_inf - b * n^c,
+# with NB_inf fixed; the decay exponent c is the log-log slope of the gap to the
+# ceiling over the three sizes, and b is set by anchoring through the observed
+# point at n0. n* (the plug-in size matching PM's NB at n0) is then
+#   n* = n0 * [ (NB_inf - NB_PM(n0)) / (NB_inf - NB_PE(n0)) ]^(1/c),
+# which reduces to the 1/n form at c = -1 and is sign-consistent with NB_PM-NB_PE.
+# =========================================================================
+lc_dat <- readRDS(file.path(res_dir, "gusto_nb_pm_pe_diff.rds")) %>%
+  dplyr::select(prior, prior_label, n, z, mean_pe, mean_pm) %>%
+  dplyr::mutate(prior_label = factor(prior_label, levels = unname(priors_nb)))
+
+# Shared, prior-independent ceiling from the full-cohort model (per threshold)
+nb_inf_tbl <- readRDS(file.path(res_dir, "gusto_nb_inf.rds"))
+lc_dat     <- dplyr::left_join(lc_dat, nb_inf_tbl, by = "z")
+
+# Decay exponent c per (prior, z): slope of log(NB_inf - NB_PE(n)) ~ log(n) over
+# the three sizes. Guard: c >= 0 or non-finite (MC noise) -> fall back to c = -1.
+c_fit <- lc_dat %>%
+  dplyr::group_by(prior_label, z) %>%
+  dplyr::summarise(c_exp = {
+      g <- nb_inf - mean_pe; ok <- is.finite(g) & g > 0
+      if (sum(ok) >= 2) unname(coef(lm(log(g[ok]) ~ log(n[ok])))[2]) else NA_real_
+    }, .groups = "drop") %>%
+  dplyr::mutate(c_exp = ifelse(is.finite(c_exp) & c_exp < 0, c_exp, -1))
+
+# Anchored power-law n* at each reference size n0 (uses observed NB at n0)
+nstar_tbl <- lc_dat %>%
+  dplyr::left_join(c_fit, by = c("prior_label", "z")) %>%
+  dplyr::rename(n0 = n, nb_pm_n0 = mean_pm, nb_pe_n0 = mean_pe) %>%
+  dplyr::mutate(
+    nstar = dplyr::case_when(
+              (nb_inf - nb_pm_n0) <= 0 ~ Inf,        # PM at/above ceiling
+              (nb_inf - nb_pe_n0) <= 0 ~ NA_real_,   # PE at/above ceiling at n0 (noise)
+              TRUE ~ n0 * ((nb_inf - nb_pm_n0) / (nb_inf - nb_pe_n0))^(1 / c_exp)
+            ),
+    extra_n = nstar - n0
+  ) %>%
+  dplyr::mutate(
+    nstar   = round(nstar),
+    extra_n = round(extra_n)
+  ) %>%
+  dplyr::select(z, prior_label, n0, nb_pe_n0, nb_pm_n0, nb_inf, c_exp,
+                nstar, extra_n) %>%
+  dplyr::arrange(z, match(prior_label, unname(priors_nb)), n0)
+
+saveRDS(nstar_tbl, file.path(res_dir, "gusto_nstar_learning_curve.rds"))
+
+knitr::kable(
+  nstar_tbl,
+  digits    = c(2, 0, 0, 4, 4, 4, 2, 0, 0),
+  col.names = c("z", "Prior", "n0", "NB(PE,n0)", "NB(PM,n0)",
+                "NB ceiling", "c", "n*", "extra n"),
+  caption   = paste("GUSTO: plug-in training size n* whose net benefit matches",
+                    "the posterior mean at n0, from an inverse-power learning",
+                    "curve (NB ceiling = full-cohort model; c = fitted decay",
+                    "exponent, prior-independent ceiling).")
+)
+```
+
+
+
+
+
+
+
+## Brute-force backbone: PE net benefit at a candidate training size
+```{r nb-pe-at-n, echo = FALSE}
+# =========================================================================
+# nb_pe_at_n(): mean plug-in (PE) net benefit at a candidate training size n,
+# for one prior, over n_sim Monte-Carlo replicates. Reproduces the main GUSTO
+# simulation exactly: same data (df_final), model spec (settings$fm_model),
+# sampling (train on n drawn rows, evaluate on the complement), per-prior fit,
+# and RAW net-benefit definition (threshold uses strict >, no /prevalence).
+# PE only, no MCMC -> cheap enough to sweep many n as the backbone of a
+# brute-force search for n* (the size at which NB_PE(n*) = NB_PM(n0)).
+#
+#   n      : candidate training size (must be < nrow(data))
+#   n_sim  : number of Monte-Carlo replicates
+#   prior  : "f" (flat MLE), "j" (Jeffreys/Firth), "lf" (log-F), "br" (Bayes ridge)
+#   z      : decision threshold(s); scalar or vector (default settings$z)
+# Returns a data.frame, one row per z: prior, n, z, n_sim, nb_pe (mean), se.
+# =========================================================================
+nb_pe_at_n <- function(n, n_sim, prior, z = settings$z,
+                       data   = df_final,
+                       fm     = settings$fm_model,
+                       logf_m = settings$logf_m,
+                       seed   = settings$seed) {
+  z <- as.numeric(z)
+  N <- nrow(data)
+  stopifnot(prior %in% c("f", "j", "lf", "br"), n >= 1, n < N, n_sim >= 1)
+
+  # Fitted candidate coefficients for the chosen prior (matches the sim loop).
+  fit_coef <- function(df_samp, mm_samp) {
+    switch(prior,
+      f  = coef(glm(fm, data = df_samp, family = binomial())),
+      j  = coef(update(glm(fm, data = df_samp, family = binomial()),
+                       method = "brglmFit", type = "AS_mean")),
+      lf = coef(logf_glm(mm_samp, df_samp$Y, m = logf_m)),
+      br = bayesian_ridge(mm_samp, df_samp$Y)$beta
+    )
+  }
+  # Raw net benefit at threshold zz (GUSTO scale: strict >, minus treat-all/none).
+  nb_raw <- function(preds, y, zz) {
+    nbt <- y - (1 - y) * zz / (1 - zz)
+    mean((preds > zz) * nbt) - max(0, mean(nbt))
+  }
+
+  vals <- matrix(NA_real_, nrow = length(z), ncol = n_sim)
+  for (i in seq_len(n_sim)) {
+    set.seed(seed + i)                       # reproducible, distinct per replicate
+    ids     <- sample(N, n)
+    df_samp <- data[ids, , drop = FALSE]
+    df_pop  <- data[-ids, , drop = FALSE]
+    mm_samp <- model.matrix(fm, df_samp)
+    mm_pop  <- model.matrix(fm, df_pop)
+    b       <- fit_coef(df_samp, mm_samp)
+    preds   <- plogis(as.numeric(mm_pop %*% b))
+    vals[, i] <- vapply(z, function(zz) nb_raw(preds, df_pop$Y, zz), numeric(1))
+  }
+  data.frame(prior = prior, n = n, z = z, n_sim = n_sim,
+             nb_pe = rowMeans(vals),
+             se    = apply(vals, 1L, sd) / sqrt(n_sim))
+}
+
+# --- Example brute-force usage (not run on render) -----------------------
+# Sweep n around a learning-curve guess and locate the crossing NB_PE(n) =
+# NB_PM(n0); compare the empirical n* to the curve-based n* in nstar_tbl.
+#
+# grid <- seq(250, 1200, by = 50)
+# sweep <- do.call(rbind, lapply(grid, nb_pe_at_n, n_sim = 2000, prior = "f", z = 0.02))
+# target <- nstar_tbl$nb_pm_n0[nstar_tbl$prior_label == "Flat" &
+#                              nstar_tbl$z == 0.02 & nstar_tbl$n0 == 250]
+# approx(sweep$nb_pe, sweep$n, xout = target)$y   # empirical n*
+```
+
+
+## Supplementary: Monte Carlo standard errors of the simulation results
+
+```{r gusto-se-tables, echo = FALSE, message = FALSE, warning = FALSE}
+# =========================================================================
+# Monte Carlo SE of each summary plotted in the main GUSTO figures, by metric,
+# method (prior x prediction type, plus the frequentist-ridge and MCMC-ridge
+# comparators), and training size n. SE matches the plotted central statistic:
+#   - mean-summarised metrics (MSE, C-statistic): SE = sd / sqrt(n_rep)
+#   - median-summarised metrics (O/E ratio, calibration slope): bootstrap SE of
+#     the median.
+# For sNB we also tabulate the SE of the paired difference Delta-NB = NB(PM) -
+# NB(PE) for the four priors. (D_KL is unavailable for GUSTO: no simulated true
+# risk.) Saved to RDS for the Supplement.
+# =========================================================================
+res <- readRDS(file.path(res_dir, "sim_gusto_results.RDS"))
+
+se_methods <- c("pe_f","pm_f","pe_j","pm_j","pe_lf","pm_lf","pe_br","pm_br",
+                "pe_ridge_min","pm_br_mcmc")
+prior_of   <- c(pe_f="Flat", pm_f="Flat", pe_j="Jeffreys", pm_j="Jeffreys",
+                pe_lf="log-F", pm_lf="log-F", pe_br="Bayesian ridge", pm_br="Bayesian ridge",
+                pe_ridge_min="Ridge (CV-min)", pm_br_mcmc="Bayesian ridge (MCMC)")
+center_map <- c(mse="mean", cstat="mean", oe_ratio="median", cal_slp="median")
+metric_lab <- c(mse="MSE", cstat="C-statistic", oe_ratio="O/E ratio", cal_slp="Calibration slope")
+prior_lv   <- c("Flat","Jeffreys","log-F","Bayesian ridge","Ridge (CV-min)","Bayesian ridge (MCMC)")
+# prior-code -> label (defined locally so this chunk is self-contained)
+priors_nb  <- c(f="Flat", j="Jeffreys", lf="log-F", br="Bayesian ridge")
+
+B_se  <- 1000
+se_of <- function(v, ctr) {
+  v <- v[is.finite(v)]
+  if (length(v) < 2) return(NA_real_)
+  if (ctr == "mean") return(sd(v) / sqrt(length(v)))
+  sd(vapply(seq_len(B_se), function(b) median(sample(v, length(v), replace = TRUE)), numeric(1)))
+}
+# central estimate whose SE we report (mean or median, matching the figure)
+ctr_of <- function(v, ctr) {
+  v <- v[is.finite(v)]
+  if (!length(v)) return(NA_real_)
+  if (ctr == "mean") mean(v) else median(v)
+}
+
+# --- Statistical metrics ---
+set.seed(settings$seed)
+gusto_se_stat <- res %>%
+  filter(as.character(metric) %in% names(center_map),
+         as.character(method) %in% se_methods) %>%
+  mutate(metric = as.character(metric), method = as.character(method)) %>%
+  group_by(metric, method, n) %>%
+  summarise(n_rep = sum(is.finite(value)),
+            est   = ctr_of(value, center_map[[dplyr::first(metric)]]),
+            se    = se_of(value,  center_map[[dplyr::first(metric)]]),
+            .groups = "drop") %>%
+  mutate(prior  = factor(prior_of[method], levels = prior_lv),
+         type   = ifelse(startsWith(method, "pm_"), "PM", "PE"),
+         metric = factor(metric_lab[metric], levels = unname(metric_lab))) %>%
+  arrange(metric, prior, type, n)
+saveRDS(gusto_se_stat, file.path(res_dir, "gusto_se_stat.rds"))
+
+# --- sNB: per-method SE (mean) by method x n x threshold ---
+nb_metrics <- grep("^nb", unique(as.character(res$metric)), value = TRUE)
+gusto_se_snb <- res %>%
+  filter(as.character(metric) %in% nb_metrics, as.character(method) %in% se_methods) %>%
+  mutate(method = as.character(method), z = as.numeric(sub("^nb", "", metric))) %>%
+  group_by(method, n, z) %>%
+  summarise(n_rep = sum(is.finite(value)),
+            est   = mean(value, na.rm = TRUE),
+            se    = sd(value, na.rm = TRUE) / sqrt(sum(is.finite(value))), .groups = "drop") %>%
+  mutate(prior = factor(prior_of[method], levels = prior_lv),
+         type  = ifelse(startsWith(method, "pm_"), "PM", "PE")) %>%
+  arrange(z, prior, type, n)
+saveRDS(gusto_se_snb, file.path(res_dir, "gusto_se_snb.rds"))
+
+# --- Delta-NB = PM - PE (paired) SE, four priors ---
+gusto_se_dnb <- res %>%
+  filter(as.character(metric) %in% nb_metrics,
+         as.character(method) %in% c("pe_f","pm_f","pe_j","pm_j","pe_lf","pm_lf","pe_br","pm_br")) %>%
+  mutate(method = as.character(method),
+         estimator = ifelse(startsWith(method, "pm_"), "pm", "pe"),
+         prior = sub("^p[me]_", "", method),
+         z = as.numeric(sub("^nb", "", metric))) %>%
+  select(iteration, n, z, prior, estimator, value) %>%
+  tidyr::pivot_wider(names_from = estimator, values_from = value) %>%
+  filter(is.finite(pe), is.finite(pm)) %>%
+  group_by(prior, n, z) %>%
+  summarise(n_rep   = dplyr::n(),
+            est     = mean(pm - pe),
+            se_diff = sd(pm - pe) / sqrt(n_rep), .groups = "drop") %>%
+  mutate(prior_label = factor(unname(priors_nb[prior]), levels = prior_lv)) %>%
+  arrange(z, prior_label, n) %>%
+  select(prior_label, n, z, n_rep, est, se_diff)   # prior_label first; drop prior code
+saveRDS(gusto_se_dnb, file.path(res_dir, "gusto_se_dnb.rds"))
+
+knitr::kable(head(gusto_se_stat, 10), digits = 5,
+             caption = "Preview: GUSTO Monte Carlo SE (statistical metrics)")
+```
+
+
+```{r gusto-se-comp, message=FALSE, warning=FALSE}
+# =========================================================================
+# SE table for the three PM computation methods:
+#   exact  = Gauss-Hermite quadrature  (pm_f, pm_j, pm_lf, pm_br)
+#   mk     = MacKay approximation       (pm_*_mk)
+#   pp     = Self-projection            (pm_*_pp)
+# Covers all four priors x three n-values x all metrics (stat + sNB).
+# Saved to gusto_se_comp.rds for the Supplement.
+# =========================================================================
+comp_methods_all <- c("pm_f","pm_f_mk","pm_f_pp",
+                      "pm_j","pm_j_mk","pm_j_pp",
+                      "pm_lf","pm_lf_mk","pm_lf_pp",
+                      "pm_br","pm_br_mk","pm_br_pp")
+# keep only methods present in the results (in case some were disabled)
+comp_methods_avail <- intersect(comp_methods_all, unique(as.character(res$method)))
+
+comp_of_method <- function(m) {
+  parts <- strsplit(m, "_", fixed = TRUE)[[1]]
+  if (length(parts) <= 2) "exact" else parts[3]
+}
+prior_of_comp <- setNames(
+  rep(c("Flat","Jeffreys","log-F","Bayesian ridge"), each = 3),
+  c("pm_f","pm_f_mk","pm_f_pp",
+    "pm_j","pm_j_mk","pm_j_pp",
+    "pm_lf","pm_lf_mk","pm_lf_pp",
+    "pm_br","pm_br_mk","pm_br_pp"))
+
+# --- Statistical metrics ---
+set.seed(settings$seed)
+gusto_se_comp_stat <- res %>%
+  filter(as.character(metric) %in% names(center_map),
+         as.character(method) %in% comp_methods_avail) %>%
+  mutate(metric = as.character(metric), method = as.character(method)) %>%
+  group_by(metric, method, n) %>%
+  summarise(est = ctr_of(value, center_map[[dplyr::first(metric)]]),
+            se  = se_of (value, center_map[[dplyr::first(metric)]]),
+            .groups = "drop") %>%
+  mutate(prior        = factor(prior_of_comp[method], levels = prior_lv),
+         comp         = vapply(method, comp_of_method, character(1)),
+         metric_label = factor(metric_lab[metric], levels = unname(metric_lab))) %>%
+  select(metric_label, prior, n, comp, est, se) %>%
+  arrange(metric_label, prior, n, comp)
+
+# --- sNB ---
+gusto_se_comp_snb <- res %>%
+  filter(as.character(metric) %in% nb_metrics,
+         as.character(method) %in% comp_methods_avail) %>%
+  mutate(method = as.character(method),
+         z = as.numeric(sub("^nb", "", metric))) %>%
+  group_by(method, n, z) %>%
+  summarise(n_rep = sum(is.finite(value)),
+            est   = mean(value, na.rm = TRUE),
+            se    = sd(value,  na.rm = TRUE) / sqrt(sum(is.finite(value))),
+            .groups = "drop") %>%
+  mutate(prior = factor(prior_of_comp[method], levels = prior_lv),
+         comp  = vapply(method, comp_of_method, character(1))) %>%
+  select(z, prior, n, comp, est, se) %>%
+  arrange(z, prior, n, comp)
+
+# --- sNB paired deltas: MacKay - exact and self-proj - exact ---
+gusto_se_comp_snb_delta <- res %>%
+  filter(as.character(metric) %in% nb_metrics,
+         as.character(method) %in% comp_methods_avail) %>%
+  mutate(method = as.character(method),
+         z      = as.numeric(sub("^nb", "", metric)),
+         prior  = prior_of_comp[method],
+         comp   = vapply(method, comp_of_method, character(1))) %>%
+  select(prior, n, z, iteration, comp, value) %>%
+  tidyr::pivot_wider(names_from = comp, values_from = value) %>%
+  filter(is.finite(exact)) %>%
+  group_by(prior, n, z) %>%
+  summarise(
+    est_mk = mean(mk   - exact, na.rm = TRUE),
+    se_mk  = sd(mk     - exact, na.rm = TRUE) / sqrt(sum(is.finite(mk   - exact))),
+    est_pp = mean(pp   - exact, na.rm = TRUE),
+    se_pp  = sd(pp     - exact, na.rm = TRUE) / sqrt(sum(is.finite(pp   - exact))),
+    .groups = "drop"
+  ) %>%
+  mutate(prior = factor(prior, levels = prior_lv)) %>%
+  arrange(z, prior, n)
+
+saveRDS(list(stat = gusto_se_comp_stat, snb = gusto_se_comp_snb,
+             snb_delta = gusto_se_comp_snb_delta),
+        file.path(res_dir, "gusto_se_comp.rds"))
+
+cat("Computation-comparison SE: stat rows =", nrow(gusto_se_comp_stat),
+    "| snb rows =", nrow(gusto_se_comp_snb),
+    "| snb_delta rows =", nrow(gusto_se_comp_snb_delta), "\n")
+cat("Methods found:", paste(sort(comp_methods_avail), collapse=", "), "\n")
+```
+
+
+```{r}
+# if (!interactive()) {
+#   system("powershell -Command \"Start-Sleep -Seconds 10; Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)\"")
+# }
+```
