@@ -1,3 +1,7 @@
+# =============================================================================
+# sufficientcause.R
+# =============================================================================
+
 library(mvtnorm)
 library(glue)
 library(ggplot2)
@@ -6,22 +10,18 @@ library(mcmapper)
 library(RColorBrewer)
 library(nleqslv)
 
-#This is defualt. The Res gen file overrides with its own settings
+# These are defaults. The ResGen file overrides them with its own settings.
 settings <- list(
   PROGNOSTIC = 1,
   TYPE = 1,
-  p_src = c(0.25, 0.75, 0.50),
-  p_des = c(1 / 3, 0.80, 2 / 3),
-  #ct_src = c(0.3, 0.3, 0.08, 0.32),
-  #ct_des = c(0.4800000, 0.3200000, 0.0600000, 0.1400000),
-  #p_src = c(1/3, 0.5, 2/3),
-  #p_src = c(0.5, 0.5, 0.5),
+  p_src = c(0.25, 0.30, 0.15), # previous value: c(0.25, 0.75, 0.50)
+  p_des = c(0.30, 0.40, 0.20), # previous value: c(1 / 3, 0.80, 2 / 3)
   prev_ratio = 1.25,
-  p_src_vars = c(0.01, 0.01, 0.01), #Variance of logitnorm dists for simulations
+  p_src_vars = c(0.01, 0.01, 0.01), # Variance of logitnorm dists for simulations
   n_sim = 10000
 )
 
-# Define a color palettesim
+# Define a color palette
 colors <- brewer.pal(4, "Set2")
 
 logit <- function(x) {
@@ -217,7 +217,11 @@ calc_metrics <- function(m) {
 }
 
 
-#Given an existing p and a new prevalence, generates new p under different scenarions. "Naive" is the logistic intercept updating
+# Given an existing p and a new prevalence, generates new p under different
+# transportability assumptions.
+#   "sesp"    : transportation by accuracy (SE/SP preserved, uses target prevalence)
+#   "por"     : proportional-odds via the cubic in eAppendix 1
+#   "prop_or" : proportional-odds via direct root finding (equivalent to "por")
 update_p <- function(
   p,
   target_prev,
@@ -232,42 +236,44 @@ update_p <- function(
     return(p_from_ct(c(A, B, C, D)))
   }
 
-  if (assumption == "ppvnpv") {
-    metrics <- calc_metrics(calc_m(p))
-
-    p <- (target_prev - 1 + metrics['npv']) /
-      (metrics['ppv'] - 1 + metrics['npv'])
-
-    A <- p * metrics['ppv']
-    B <- p * (1 - metrics['ppv'])
-    C <- (1 - p) * (1 - metrics['npv'])
-    D <- 1 - A - B - C
-    return(p_from_ct(c(A, B, C, D)))
-  }
-
-  #por solves using cubic; prop_or solves using root finding
+  # por: proportional-odds solved via the cubic (eAppendix 1)
   if (assumption == "por") {
-    f <- function(x,t,u,v,a)
-    {
-      c3 <- t*u*v * (1-a)
-      c2 <- (3*a-2)*t*u*v - a*(t*u + t*v + u*v) + t*u + u*v
-      c1 <- -a*(3*t*u*v - 2*t*u - 2*t*v - 2*u*v + t + u + v)
-      c0 <- -a*(1-t)*(1-u)*(1-v)
-      
-      c3*x^3+c2*x^2+c1*x+c0
+    f <- function(x, t, u, v, a) {
+      c3 <- t * u * v * (1 - a)
+      c2 <- (3 * a - 2) *
+        t *
+        u *
+        v -
+        a * (t * u + t * v + u * v) +
+        t * u +
+        u * v
+      c1 <- -a * (3 * t * u * v - 2 * t * u - 2 * t * v - 2 * u * v + t + u + v)
+      c0 <- -a * (1 - t) * (1 - u) * (1 - v)
+
+      c3 * x^3 + c2 * x^2 + c1 * x + c0
     }
-    if(sign(f(0, p[1], p[2], p[3], target_prev))==sign(f(1000, p[1], p[2], p[3], target_prev)))
-    {
+    if (
+      sign(f(0, p[1], p[2], p[3], target_prev)) ==
+        sign(f(1000, p[1], p[2], p[3], target_prev))
+    ) {
       warning("No odds-ratio between 0 and 1000.")
     }
-    x <- uniroot(f, c(0, max(100000,2*target_prev/(min(p)))), p[1], p[2], p[3], target_prev)$root
+    x <- uniroot(
+      f,
+      c(0, max(100000, 2 * target_prev / (min(p)))),
+      p[1],
+      p[2],
+      p[3],
+      target_prev
+    )$root
     #message("Odds-ratio is ", x)
-    T_ <- x * p[1] / (1 - p[1]+ x * p[1])
+    T_ <- x * p[1] / (1 - p[1] + x * p[1])
     U_ <- x * p[2] / (1 - p[2] + x * p[2])
     V_ <- x * p[3] / (1 - p[3] + x * p[3])
     return(c(T_, U_, V_))
   }
 
+  # prop_or: proportional-odds solved by direct root finding (equivalent to por)
   if (assumption == "prop_or") {
     apply_or <- function(p, z) {
       ifelse(p == p^2, p, {
@@ -277,20 +283,8 @@ update_p <- function(
     }
 
     if (settings$PROGNOSTIC == 1) {
-      f = function(x) {
-        if (assumption == "T") {
-          upda
-          p2 <- apply_or(p, c(x, 1, 1))
-        }
-        if (assumption == "U") {
-          p2 <- apply_or(p, c(1, x, 1))
-        }
-        if (assumption == "V") {
-          p2 <- apply_or(p, c(1, 1, x))
-        }
-        if (assumption == "prop_or") {
-          p2 <- apply_or(p, c(x, x, x))
-        }
+      f <- function(x) {
+        p2 <- apply_or(p, c(x, x, x))
         if (settings$TYPE == 1) {
           prev <- p2[1] * p2[2] + p2[2] * p2[3] - p2[1] * p2[2] * p2[3]
         } else {
@@ -301,105 +295,20 @@ update_p <- function(
 
       res <- uniroot(f, interval = c(0.0001, 20000))
       or <- res$root
-      #message(paste("OR was",or))
-
-      if (assumption == "T") {
-        or <- c(or, 1, 1)
-      }
-      if (assumption == "U") {
-        or <- c(1, or, 1)
-      }
-      if (assumption == "V") {
-        or <- c(1, 1, or)
-      }
-      if (assumption == "prop_or") {
-        or <- c(or, or, or)
-      }
-      return(apply_or(p, or))
+      #message(paste("OR was", or))
+      return(apply_or(p, c(or, or, or)))
     } else {
       or <- target_prev / (1 - target_prev) / (p[1] / (1 - p[1]))
-
       return(apply_or(p, or))
     }
   }
 }
 
 
-# line_data <- list(
-#   "N" = 11,
-#   "ncontrols" = c(167, 48, 12, 58, 24, 75, 453, 38, 195, 136, 20),
-#   "tn" = c(155, 46, 12, 56, 24, 74, 445, 38, 193, 136, 20),
-#   "ncases" = c(203, 18, 9, 42, 15, 103, 425, 27, 109, 87, 59),
-#   "tp" = c(150, 9, 8, 30, 10, 53, 282, 7, 53, 48, 57)
-# )
-#
-#
-# ABCD_data <- data.frame(
-#   A = line_data$tp,
-#   B = line_data$ncontrols - line_data$tn,
-#   C = line_data$ncases - line_data$tp,
-#   D = line_data$tn
-# )
-# ABCD_data <- ABCD_data / rowSums(ABCD_data)
-#
-# tbl <- cbind(
-#   A = line_data$tp,
-#   B = line_data$ncontrols - line_data$tn,
-#   C = line_data$ncases - line_data$tp,
-#   D = line_data$tn
-# )
-
-chisq_val <- function(ABCD, abcd) {
-  goods <- which(abcd > 0)
-  sum(((abcd[goods] - ABCD[goods])^2) / abcd[goods])
-}
-
-
-data_generator <- function(n = 100) {
-  bx <- by <- bz <- rep(NA, n)
-  Px <- Py <- Pz <- rep(NA, n)
-  N <- rep(NA, n)
-  P000 <- P001 <- P010 <- P011 <- P100 <- P101 <- P110 <- P111 <- rep(NA, n)
-  P <- X <- matrix(NA, nrow = n, ncol = 4)
-
-  mux <- 0
-  vx <- 1
-
-  muy <- 0.5
-  vy <- 0.001
-
-  muz <- 1
-  vz <- 0.001
-
-  for (i in 1:n) {
-    bx[i] <- rnorm(1, mux, sqrt(vx))
-    by[i] <- rnorm(1, muy, sqrt(vy))
-    bz[i] <- rnorm(1, muz, sqrt(vz))
-
-    Px[i] <- 1 / (1 + exp(-bx[i]))
-    Py[i] <- 1 / (1 + exp(-by[i]))
-    Pz[i] <- 1 / (1 + exp(-bz[i]))
-
-    P000[i] <- (1 - Px[i]) * (1 - Py[i]) * (1 - Pz[i])
-    P001[i] <- (1 - Px[i]) * (1 - Py[i]) * Pz[i]
-    P010[i] <- (1 - Px[i]) * Py[i] * (1 - Pz[i])
-    P011[i] <- (1 - Px[i]) * Py[i] * Pz[i]
-    P100[i] <- Px[i] * (1 - Py[i]) * (1 - Pz[i])
-    P101[i] <- Px[i] * (1 - Py[i]) * Pz[i]
-    P110[i] <- Px[i] * Py[i] * (1 - Pz[i])
-    P111[i] <- Px[i] * Py[i] * Pz[i]
-
-    P[i, 1] <- P101[i] + P110[i] + P111[i]
-    P[i, 2] <- P100[i]
-    P[i, 3] <- P001[i] + P011[i]
-    P[i, 4] <- P000[i] + P010[i]
-
-    X[i, ] <- rmultinom(1, 100, P[i, ])
-    N[i] <- 100
-  }
-
-  colnames(X) <- c('A', 'B', 'C', 'D')
-  X
+# Kullback-Leibler divergence between two contingency tables (bits).
+# abcd = true (target) table; ABCD = candidate (transported) table.
+KL_ABCD <- function(abcd, ABCD) {
+  sum(abcd * log2(abcd / ABCD))
 }
 
 
@@ -518,7 +427,7 @@ draw_dependence_plot <- function(
     theme(
       legend.position = "none",
       legend.text = element_text(size = 20),
-      plot.title = element_text(hjust = 0.5, size = 32),
+      #plot.title = element_text(hjust = 0.5, size = 32),
       axis.title.x = element_text(size = 24),
       axis.title.y = element_text(size = 24),
       axis.text.x = element_text(size = 20),
@@ -538,15 +447,6 @@ draw_dependence_plot <- function(
   plt
 }
 
-#
-KL_bernouli <- function(p, q) {
-  p * log2(p) / log2(q) + (1 - p) * log2(1 - p) / log2(1 - q)
-}
-
-KL_ABCD <- function(abcd, ABCD) {
-  sum(abcd * log2(abcd / ABCD))
-}
-
 
 simulate_updating_scenarios <- function(
   n_sim = settings$n_sim,
@@ -557,31 +457,17 @@ simulate_updating_scenarios <- function(
     "TU",
     "TV",
     "UV",
-    "TUV",
-    "indl",
+    "ind",
     "wdep",
     "mdep",
     "sdep",
     "fdep",
-    "max_entropy",
-    "ind_unif"
+    "ind_unif",
+    "max_entropy"
   )
 ) {
-  # parms1 <- unlist(logitnorm_params(
-  #   0,
-  #   settings$p_src_vars[1]
-  # ))[1:2]
-  # parms2 <- unlist(logitnorm_params(
-  #   0,
-  #   settings$p_src_vars[2]
-  # ))[1:2]
-  # parms3 <- unlist(logitnorm_params(
-  #   0,
-  #   settings$p_src_vars[3]
-  # ))[1:2]
-
-  mus <- c(0, 0, 0)
-  sigmas <- c(1, 1, 1) 
+  mus <- c(0, 0, 0) #logit(settings$p_src)
+  sigmas <- c(1, 1, 1)
 
   if (scenario == "ind") {
     covmat <- cov_from_vars_rho(sigmas^2, 0)
@@ -694,61 +580,42 @@ simulate_updating_scenarios <- function(
   metrics1 <- calc_metrics(m[1:n_sim, ])
   metrics2 <- calc_metrics(m[(n_sim + 1):(2 * n_sim), ])
 
-  SS <- BS <- KL <- c(sesp = 0, ppvnpv = 0, prop_or = 0)
+  KL <- c(sesp = 0, ppvnpv = 0, prop_or = 0)
   N <- 0
 
   for (i in 1:n_sim) {
-    # cat(i, "|")
-    #ABCDs <- metrics1[i, c('A', 'B', 'C', 'D')]
     ABCDt <- metrics2[i, c('A', 'B', 'C', 'D')]
-    PD <- ABCDt[1] + ABCDt[3]
-    PT <- ABCDt[1] + ABCDt[2]
+    PD <- ABCDt[1] + ABCDt[3] # target outcome prevalence
+    PT <- ABCDt[1] + ABCDt[2] # target marker positivity
 
-    #sesp
+    # By accuracy: preserve source SE/SP, use target prevalence (Bayes)
     A <- PD * metrics1[i, 'se']
     B <- (1 - PD) * (1 - metrics1[i, 'sp'])
     C <- PD - A
     D <- (1 - PD) - B
     ABCDsesp <- c(A, B, C, D)
-    SS['sesp'] <- SS['sesp'] + sum((ABCDsesp - ABCDt)^2)
-    xsesp <- PD *
-      (C / (A + C))^2 +
-      (1 - PD) * (B / (B + D))^2
-    BS['sesp'] <- BS['sesp'] + xsesp
     KL['sesp'] <- KL['sesp'] + KL_ABCD(ABCDt, ABCDsesp)
 
-    #ppvnpv (ie as is)
+    # By predictive values (as is): preserve source PPV/NPV, use target marker positivity
     A <- PT * metrics1[i, 'ppv']
     B <- PT - A
     C <- (1 - PT) * (1 - metrics1[i, 'npv'])
     D <- (1 - PT) - C
     ABCDppvnpv <- c(A, B, C, D)
-    SS['ppvnpv'] <- SS['ppvnpv'] + sum((ABCDppvnpv - ABCDt)^2)
-    xppvnpv <- PD *
-      (C / (A + C))^2 +
-      (1 - PD) * (B / (B + D))^2
-    BS['ppvnpv'] <- BS['ppvnpv'] + xppvnpv
     KL['ppvnpv'] <- KL['ppvnpv'] + KL_ABCD(ABCDt, ABCDppvnpv)
 
-    #prop_or
+    # Proportional-odds
     q <- update_p(
       TUVs[i, ],
-      target_prev = ABCDt[1] + ABCDt[3],
+      target_prev = PD,
       assumption = "por"
     )
     ABCDprop_or <- calc_metrics(calc_m(q))[c('A', 'B', 'C', 'D')]
-    SS['prop_or'] <- SS['prop_or'] + sum((ABCDprop_or - ABCDt)^2)
-    xprop_or <- PD *
-      (ABCDprop_or[3] / (ABCDprop_or[1] + ABCDprop_or[3]))^2 +
-      (1 - PD) * (ABCDprop_or[3] / (ABCDprop_or[2] + ABCDprop_or[4]))^2
-    BS['prop_or'] <- BS['prop_or'] + xprop_or
     KL['prop_or'] <- KL['prop_or'] + KL_ABCD(ABCDt, ABCDprop_or)
 
     N <- N + 1
   }
   c(
-    SS = SS / N,
-    BS = BS / N,
     KL = KL / N,
     cor.se = cor(metrics1[, 'prev'], metrics1[, 'se']),
     cor.sp = cor(metrics1[, 'prev'], metrics1[, 'sp']),

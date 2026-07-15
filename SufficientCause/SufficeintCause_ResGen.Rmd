@@ -1,5 +1,5 @@
 ---
-title: "SufficientCause_ResGen"
+title: "SufficientCause_ResGen (v2)"
 author: "Mohsen Sadatsafavi"
 date: "`r Sys.Date()`"
 output:
@@ -15,7 +15,10 @@ source("sufficientcause.R")
 
 set.seed(123)
 
-res_folder <- "M:/Projects/2024/Project.SufficientCause/output/wip/"
+# Output directory for figures/tables/RDS, relative to this code directory.
+# (Previously a hard-coded absolute path; made relative for portability.)
+# Change this if you want results written elsewhere.
+res_folder <- "../output/tmp/"
 
 saveRDS(settings, paste0(res_folder,"settings.RDS"))
 
@@ -145,7 +148,7 @@ cors <- data.frame(
   ppv = double(),
   npv= double()
 )
-  
+
 scenarios <- c(
   "T"="T",
   "U"="U",
@@ -157,7 +160,7 @@ scenarios <- c(
   "T+U+V \n (weakly correlated)"="wdep",
   "T+U+V \n (moderately correlated)"="mdep",
   "T+U+V \n (strongly correlated)"="sdep",
-  "T+U+V \n (fully correlated)"="fdep",   
+  "T+U+V \n (fully correlated)"="fdep",
   "Maximum entropy"="ind_unif"
 )
 
@@ -196,26 +199,21 @@ ggplot() +
   annotate("rect", xmin = 0, xmax = 1, ymin = 2, ymax = 2.8, fill = "#009E73", color = "black") +
   annotate("rect", xmin = 0, xmax = 1, ymin = 1, ymax = 1.8, fill = "#56B4E9", color = "black") +
   annotate("rect", xmin = 0, xmax = 1, ymin = 0, ymax = .8, fill = "#E69F00", color = "black") +
-  
+
   # Text labels (to the right of boxes)
   annotate("text", x = 1.2, y = 2.4, label = "By predictive values", hjust = 0, size = 20) +
   annotate("text", x = 1.2, y = 1.4, label = "By accuracy", hjust = 0, size = 20) +
   annotate("text", x = 1.2, y = 0.4, label = "Proportional odds", hjust = 0, size = 20) +
-  
+
   # Title (centered above boxes)
   annotate("text", x = 3, y = 4.3, label = "Transportation Method", hjust = 0.5, fontface = "bold", size = 20) +
-  
+
   # Coordinate limits and theme
   coord_cartesian(xlim = c(0, 6), ylim = c(0, 5), clip = "off") +
   theme_void()
 saveRDS(results, file=paste0(res_folder,"simulations.P.rds"))
 ggsave(paste0(res_folder,"simulations_legend.png"), dpi=300, units="mm", device="png", width=400, height=200)
 ```
-
-
-
-
-
 
 
 
@@ -252,16 +250,6 @@ df_long <- results %>%
                names_to = "method",
                values_to = "value")
 
-# results$scenario[which(results$scenario=="T")]="D"
-# results$scenario[which(results$scenario=="TU")]="DU"
-# results$scenario[which(results$scenario=="TV")]="DV"
-# results$scenario[which(results$scenario=="TUV")]="DUV"
-
-df_long <- results %>%
-  pivot_longer(cols = c(sesp, ppvnpv, prop_or),
-               names_to = "method",
-               values_to = "value")
-
 df_long$scenario <- factor(df_long$scenario, levels = names(scenarios))
 df_long$method <- factor(df_long$method, levels = c("ppvnpv","sesp","prop_or"))
 
@@ -279,46 +267,7 @@ ggsave(paste0(res_folder,"simulations.D.png"), dpi=300, units="mm", device="png"
 
 
 
-#Numerical results
-```{r, eval=FALSE}
-results <- list()
-
-results$base_m <- calc_m(settings$p_src)
-results$base_metrics <- calc_metrics(results$base_m)
-
-#What if prevalence higher by 50?
-p2_sesp <- update_p(
-  settings$p_src,
-  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
-  assumption = "sesp"
-)
-results$update_sesp$p <- p2_sesp
-results$update_sesp$metrics <- calc_metrics(calc_m(p2_sesp))
-
-p2_ppvnpv <- update_p(
-  settings$p_src,
-  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
-  assumption = "ppvnpv"
-)
-results$update_ppvnpv$p <- p2_ppvnpv
-results$update_ppvnpv$metrics <- calc_metrics(calc_m(p2_ppvnpv))
-
-p2_prop_or <- update_p(
-  settings$p_src,
-  target_prev = results$base_metrics['prev'] * settings$prev_ratio,
-  assumption = "prop_or"
-)
-results$update_prop_or$p <- p2_prop_or
-results$update_prop_or$metrics <- calc_metrics(calc_m(p2_prop_or))
-results$update_prop_or$or <- p2_prop_or[1]/(1-p2_prop_or[1])/(settings$p_src[1]/(1-settings$p_src[1]))
-
-saveRDS(results, paste0(res_folder,"results.RDS"))
-```
-
-
-
-
-
+#Numerical results (Table 2)
 ```{r}
 results2 <- list()
 
@@ -339,6 +288,7 @@ p2_sesp <- update_p(
 results2$ps$sesp <- p2_sesp
 results2$metrics$sesp <- calc_metrics(calc_m(p2_sesp))
 
+# By predictive values: preserve source PPV/NPV, use target's observed marker positivity
 pt <- settings$p_des[1]
 ct2 <- c(pt*results2$metrics$src['ppv'], pt*(1-results2$metrics$src['ppv']), (1-pt)*(1-results2$metrics$src['npv']), (1-pt)*results2$metrics$src['npv'])
 p2_ppvnpv <- p_from_ct(ct2)
