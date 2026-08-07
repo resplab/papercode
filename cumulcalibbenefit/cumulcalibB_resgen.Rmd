@@ -32,7 +32,6 @@ load_module <- function(obj)
   assign(obj, envir=.GlobalEnv, readRDS(paste0(res_path,obj,".RDS")))
 }
 
-collector <- list()
 
 my_format <- function(val, n_digits=4)
 {
@@ -50,9 +49,9 @@ proper_colors <- c( "1pm1"="#1f77b4",
 settings <- list(
   def_parms=c(b0=0, bx=0.25, ba=-0.5, bxa=0.25),
   #N=c(100, 250, 1000, 5000),
-  h0_sim_parms= list(n_sim=2000, N=c(500, 5000), b0=c(-1,1), bx=c(0,0.25), ba=c(-0.5,-0.25), bxa=c(0,0.25)),
-  h0b_sim_parms=list(n_sim=2000, N = c(500, 5000), b0 = c(-1/2, 0, 1/2), b1 = c(2/3, 1, 3/2)),
-  h1a_sim_parms=list(n_sim=2000, N=c(500,2500,10000), 
+  h0_sim_parms= list(n_sim=2000*5, N=c(500, 5000), b0=c(-1,1), bx=c(0,0.25), ba=c(-0.5,-0.25), bxa=c(0,0.25)),
+  h0b_sim_parms=list(n_sim=2000*5, N = c(500, 5000), b0 = c(-1/2, 0, 1/2), b1 = c(2/3, 1, 3/2)),
+  h1a_sim_parms=list(n_sim=2000*5, N=c(500,2500,10000), 
                     scenarios=list(
                      s1=c(a=-0.25,b=0.75),
                      s2=c(a=0,b=0.75),
@@ -65,7 +64,7 @@ settings <- list(
                      s7=c(a=-0.25,b=1.5),
                      s8=c(a=0,b=1.5),
                      s9=c(a=0.25,b=1.5))),
-  h1b_sim_parms=list(n_sim=2000, N=c(500,2500,10000), 
+  h1b_sim_parms=list(n_sim=2000*5, N=c(500,2500,10000), 
                     scenarios=list(
                      s1=c(a0=0,    b0=1,   a1=-0.25, b1=1),
                      s2=c(a0=-0.25,b0=1,   a1=0,     b1=1),
@@ -142,13 +141,10 @@ set.seed(seed)
 p0 <- integrate(function(x) {dnorm(x)*expit(settings$def_parms['b0']+settings$def_parms['bx']*x)}, -3, 3)$value
 p1 <- integrate(function(x) {dnorm(x)*expit(settings$def_parms['b0']+settings$def_parms['bx']*x+settings$def_parms['ba']+settings$def_parms['bxa']*x)}, -3, 3)$value
 
-collector$def_res$p0 <- p0
-collector$def_res$p1 <- p1
-
 r <- 0.5
 df <- gen_data(2000, parms=settings$def_parms, r=r)
-res1 <- cumulcalibB(df$Y, df$h, df$a, df$p0, aux = T)
-res2 <- cumulcalibB(df$Y, df$h, df$a, aux=T)
+res1 <- cumulcalibITE(df$Y, df$h, df$a, df$p0, aux = T)
+res2 <- cumulcalibITE(df$Y, df$h, df$a, aux=T)
 
 df1 <- data.frame(
   index = 1:length(res1$aux$mu),
@@ -279,10 +275,10 @@ out_list <- foreach(row = 1:nrow(param_grid), .combine = rbind, .packages = c("c
   
   results$NY <- sum(df$Y)
   
-  results$pval[1] <- cumulcalibB(df$Y, df$h, df$a, df$p0, method = "BM")$pval
-  results$pval[2] <- cumulcalibB(df$Y, df$h, df$a, df$p0, method = "BB")$pval
-  results$pval[3] <- cumulcalibB(df$Y, df$h, df$a, method = "BM")$pval
-  results$pval[4] <- cumulcalibB(df$Y, df$h, df$a, method = "BB")$pval
+  results$pval[1] <- cumulcalibITE(df$Y, df$h, df$a, df$p0, method = "BM")$pval
+  results$pval[2] <- cumulcalibITE(df$Y, df$h, df$a, df$p0, method = "BB")$pval
+  results$pval[3] <- cumulcalibITE(df$Y, df$h, df$a, method = "BM")$pval
+  results$pval[4] <- cumulcalibITE(df$Y, df$h, df$a, method = "BB")$pval
   
   results
 }
@@ -341,7 +337,7 @@ for(i in 1:length(sp$N))
           scale_color_manual(
             name="Test: ",
             values = proper_colors, 
-            labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+            labels = c("1pm1"="BM-conditional", "2pm1"="Bridge-conditional", "1pm2"="BM-marginal", "2pm2"="Bridge-marginal")
           ) +
           theme_minimal() + theme(plot.margin=margin(0, 0, 0, 0), 
                                   axis.text=element_text(size=3), 
@@ -364,6 +360,41 @@ ggarrange(plotlist=plts, labels = "",
           legend = "top")
 ggsave(paste0(res_path,"h0_sim_ecdfs.pdf"), width=4, height=8, bg="white", device = cairo_pdf)
 
+```
+
+
+#### H0 summary-table generator
+```{r}
+if(!exists("h0_sim_data")) {load_module("h0_sim_data")}
+
+rate_se <- function(p, n) sqrt(p * (1 - p) / n)
+
+# One row per scenario x test: mean p-value and rejection rates, each with a
+# Monte Carlo SE. The main-text table uses the mean p-value and the 0.05
+# rejection rate; the 0.10 and 0.20 rates are retained here for completeness.
+h0_reject <- h0_sim_data %>%
+  group_by(N, b0, bx, ba, bxa, type) %>%
+  summarise(
+    n_sim        = n(),
+    mean_pval    = mean(pval),
+    mean_pval_se = sd(pval) / sqrt(n()),
+    reject_05    = mean(pval < 0.05),
+    reject_10    = mean(pval < 0.10),
+    reject_20    = mean(pval < 0.20),
+    .groups      = "drop"
+  ) %>%
+  mutate(
+    reject_05_se = rate_se(reject_05, n_sim),
+    reject_10_se = rate_se(reject_10, n_sim),
+    reject_20_se = rate_se(reject_20, n_sim),
+    Test = factor(type,
+                  levels = c("1pm1", "2pm1", "1pm2", "2pm2"),
+                  labels = c("Conditional BM", "Conditional bridge",
+                             "Marginal BM", "Marginal bridge"))
+  ) %>%
+  arrange(N, b0, bx, ba, bxa, Test)
+
+saveRDS(h0_reject, paste0(res_path, "h0_reject.RDS"))
 ```
 
 
@@ -412,7 +443,7 @@ out_list <- foreach(
       pval = NA_real_
     )
 
-    tmp <- cumulcalibB(df$Y, df$h, df$a, df$q0, method = c("BM", "BB"))
+    tmp <- cumulcalibITE(df$Y, df$h, df$a, df$q0, method = c("BM", "BB"))
     results$pval[1] <- tmp$by_method$BM$pval
     results$pval[2] <- tmp$by_method$BB$pval
 
@@ -625,10 +656,10 @@ res_list <- foreach(idx = 1:nrow(param_grid), .packages = c("cumulcalib")) %dopa
   a <- rbinom(N, 1, 0.5)
   Y <- rbinom(N,1,p0*(1-a)+p1*a)
   
-  r12 <- cumulcalibB(Y, h, a, pi0)
-  #r2 <- cumulcalibB(Y, h, a, pi0, method = "BB")
-  r34 <- cumulcalibB(Y, h, a)
-  #r4 <- cumulcalibB(Y, h, a, method = "BB")
+  r12 <- cumulcalibITE(Y, h, a, pi0)
+  #r2 <- cumulcalibITE(Y, h, a, pi0, method = "BB")
+  r34 <- cumulcalibITE(Y, h, a)
+  #r4 <- cumulcalibITE(Y, h, a, method = "BB")
   
   data.frame(
     i = rep(isim, 4),
@@ -703,14 +734,14 @@ for(i in 1:length(sp$scenarios))
     scale_color_manual(
       name   = "Test: ",
       values=proper_colors,
-      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
-                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+      labels = c("1pm1"="BM-conditional", "2pm1"="Bridge-conditional", 
+                 "1pm2"="BM-marginal", "2pm2"="Bridge-marginal")
     ) +
     scale_fill_manual(
       name   = "Test: ",
       values=proper_colors,
-      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
-                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+      labels = c("1pm1"="BM-conditional", "2pm1"="Bridge-conditional", 
+                 "1pm2"="BM-marginal", "2pm2"="Bridge-marginal")
     ) +
     annotate(geom="text", x=0, y=0.9, label=scenario_, parse=TRUE, hjust=0) +
     ylim(0,1.1) +
@@ -864,10 +895,10 @@ res_list <- foreach(idx = 1:nrow(param_grid), .packages = c("cumulcalib")) %dopa
   a <- rbinom(N, 1, 0.5)
   Y <- rbinom(N,1,p0*(1-a)+p1*a)
   
-  r1 <- cumulcalibB(Y, h, a, pi0, method = "BM")
-  r2 <- cumulcalibB(Y, h, a, pi0, method = "BB")
-  r3 <- cumulcalibB(Y, h, a, method = "BM")
-  r4 <- cumulcalibB(Y, h, a, method = "BB")
+  r1 <- cumulcalibITE(Y, h, a, pi0, method = "BM")
+  r2 <- cumulcalibITE(Y, h, a, pi0, method = "BB")
+  r3 <- cumulcalibITE(Y, h, a, method = "BM")
+  r4 <- cumulcalibITE(Y, h, a, method = "BB")
   
   data.frame(
     i = rep(isim, 4),
@@ -942,14 +973,14 @@ for(i in 1:length(sp$scenarios))
     scale_color_manual(
       name   = "Test: ",
       values=proper_colors,
-      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
-                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+      labels = c("1pm1"="BM-conditional", "2pm1"="Bridge-conditional", 
+                 "1pm2"="BM-marginal", "2pm2"="Bridge-marginal")
     ) +
     scale_fill_manual(
       name   = "Test: ",
       values=proper_colors,
-      labels = c("1pm1"="Approach 1 - 1-part", "2pm1"="Approach 1 - 2-part", 
-                 "1pm2"="Approach 2 - 1-part", "2pm2"="Approach 2 - 2-part")
+      labels = c("1pm1"="BM-conditional", "2pm1"="Bridge-conditional", 
+                 "1pm2"="BM-marginal", "2pm2"="Bridge-marginal")
     ) +
     annotate(geom="text", x=0, y=0.9, label=names(sp$scenarios)[i], parse=TRUE, hjust=0) +
     ylim(0,1.1) +
@@ -974,84 +1005,6 @@ for(i in 1:length(sp$scenarios))
 ggarrange(plotlist=plts, common.legend=TRUE, legend="top")
 ggsave(paste0(res_path,"h1b_sim_bars.pdf"), width=9, height=6, bg="white", device=cairo_pdf())
 
-```
-
-
-
-
-
-### GUSTO
-```{r}
-set.seed(seed)
-
-data(gusto)
-
-## Coding the treatment groups ##
-df <- gusto %>% filter(tx!="SK+tPA")
-df$a <- ifelse(df$tx=="tPA", 1, 0)*1 ## 1 for TPA 0 for other (SKA or SKA combo)
-df$Y <- df$day30
-df$kill <- (as.numeric(df$Killip)>1)*1 ## Killip Class Binary (0 = KC 1) 
-
-data_us <- df[df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),] 
-data_other <- df[!df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),]
-
-dev_dataL <- data_other ## training data
-dev_dataS <- data_other[sample(nrow(data_other), size=nrow(data_other)/10, replace=F),]
-
-val_dataL <- data_us ## validation data
-val_dataS <- data_us[sample(nrow(data_us), size=nrow(data_us)/10, replace=F),]
-
-
-collector$gusto$sample_sizes <- c(devS=nrow(dev_dataS), devL=nrow(dev_dataL), valS=nrow(val_dataS), valL=nrow(val_dataL))
-
-collector$gusto$prevs <- c(devS=mean(dev_dataS$Y), devL=mean(dev_dataL$Y), valS=mean(val_dataS$Y), valL=mean(val_dataL$Y))
-tmp <- cbind(devS=ate(dev_dataS$Y, dev_dataS$a), devL=ate(dev_dataL$Y,dev_dataL$a), valS=ate(val_dataS$Y,val_dataS$a), valL=ate(val_dataL$Y,val_dataL$a))
-collector$gusto$ATEs <- tmp[1,]
-collector$gusto$ATE_SEs <- sqrt(tmp[2,])
-
-
-ite_modelL <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
-                   a + a:sex + a:age, data = dev_dataL,
-                  family=binomial(link="logit"))
-
-
-ite_modelS <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
-                   a + a:sex + a:age, data = dev_dataS,
-                  family=binomial(link="logit"))
-
-collector$gusto$modelS$model <- summary(ite_modelS)
-collector$gusto$modelL$model <- summary(ite_modelL)
-
-
-
-for(src in c("L","S"))
-  for(dest in c("L","S")){
-    ite_model <- get(paste0("ite_model",src))
-    dt <- get(paste0("val_data",dest))
-    tmp <- dt
-    tmp$a<-0
-    p0 <- predict(ite_model, newdata=tmp, type="response")
-    tmp$a<-1
-    p1 <- predict(ite_model, newdata=tmp, type="response")
-    df <- data.frame(Y=dt$Y, p0=p0, h=p0-p1, t=dt$a)
-    df <- df[order(df$h),]
-  
-    res <- cumulcalibB(df$Y, df$h, df$t, df$p0, method = "BB")
-    png(paste0(res_path,"gusto_rw_",src,dest,"1.png"), width = 2000, height = 1500, res = 300)
-    plot(res)
-    dev.off()
-    plot(res)
-    collector$gusto[[paste0("res",src,dest,"1")]] <- res
-    
-    res <- cumulcalibB(df$Y, df$h, df$t, method = "BB")
-    png(paste0(res_path,"gusto_rw_",src,dest,"2.png"), width = 2000, height = 1500, res = 300)
-    plot(res)
-    dev.off()
-    plot(res)
-    collector$gusto[[paste0("res",src,dest,"2")]] <- res
-  }
-
-saveRDS(collector, paste0(res_path,"collector.RDS"))
 ```
 
 
