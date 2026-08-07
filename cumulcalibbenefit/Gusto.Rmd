@@ -1,0 +1,260 @@
+---
+title: "R Notebook"
+author: "Mohsen Sadatsafavi"
+date: February 11, 2026 
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r}
+library(dplyr)
+library(cumulcalib)
+library(predtools)
+
+source("core.r")
+
+res_path <- "M:/Projects/2025/Project.cumulcalibBenefit/results/wip/"  #Trailing / is required!
+
+
+collector <- list()
+
+my_format <- function(val, n_digits=4)
+{
+  format(round(val,n_digits),nsmall=n_digits, big.mark=",")
+}
+```
+
+
+
+### GUSTO
+```{r}
+set.seed(122)
+
+data(gusto)
+
+## Coding the treatment groups ##
+df <- gusto %>% filter(tx!="SK+tPA")
+df$a <- ifelse(df$tx=="tPA", 1, 0)*1 ## 1 for TPA 0 for other (SKA or SKA combo)
+df$Y <- df$day30
+df$kill <- (as.numeric(df$Killip)>1)*1 ## Killip Class Binary (0 = KC 1) 
+
+data_us <- df[df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),] 
+data_other <- df[!df$regl %in% c(1, 7, 9, 10, 11, 12, 14, 15),]
+
+dev_dataL <- data_other ## training data
+dev_dataS <- data_other[sample(nrow(data_other), round(nrow(data_other)/10)),]
+
+val_dataL <- data_us ## validation data
+val_dataS <- data_us[sample(nrow(data_us), round(nrow(data_us)/10)),]
+
+
+collector$gusto$sample_sizes <- c(devS=nrow(dev_dataS), devL=nrow(dev_dataL), valS=nrow(val_dataS), valL=nrow(val_dataL))
+
+collector$gusto$prevs <- c(devS=mean(dev_dataS$Y), devL=mean(dev_dataL$Y), valS=mean(val_dataS$Y), valL=mean(val_dataL$Y))
+tmp <- cbind(devS=ate(dev_dataS$Y, dev_dataS$a), devL=ate(dev_dataL$Y,dev_dataL$a), valS=ate(val_dataS$Y,val_dataS$a), valL=ate(val_dataL$Y,val_dataL$a))
+collector$gusto$ATEs <- tmp[1,]
+collector$gusto$ATE_SEs <- sqrt(tmp[2,])
+
+
+ite_modelL <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
+                   a + a:sex + a:age, data = dev_dataL,
+                  family=binomial(link="logit"))
+
+
+ite_modelS <- glm(Y ~ sex + age + miloc + pmi + kill + pmin(sysbp,100) + pulse +
+                   a + a:sex + a:age, data = dev_dataS,
+                  family=binomial(link="logit"))
+
+collector$gusto$modelS$model <- summary(ite_modelS)
+collector$gusto$modelL$model <- summary(ite_modelL)
+
+
+
+for(src in c("L","S"))
+  for(dest in c("L","S")){
+    ite_model <- get(paste0("ite_model",src))
+    dt <- get(paste0("val_data",dest))
+    tmp <- dt
+    tmp$a<-0
+    p0 <- predict(ite_model, newdata=tmp, type="response")
+    tmp$a<-1
+    p1 <- predict(ite_model, newdata=tmp, type="response")
+    df <- data.frame(Y=dt$Y, p0=p0, h=p0-p1, t=dt$a)
+    df <- df[order(df$h),]
+  
+    res <- cumulcalibITE(df$Y, df$h, df$t, df$p0, method = c("BM","BB"))
+    png(paste0(res_path,"gusto_rw_",src,dest,"1.png"), width = 2000, height = 1500, res = 300)
+    # De-emphasize inference: mark the maximum cumulative error C* (method BM),
+    # drop significance thresholds. This keeps the figure marker aligned with the
+    # C* direction reported in the tables. The panel title (test type) is placed
+    # inside the plot region (top-left) because the top margin holds the secondary
+    # predicted-ITE axis.
+    plot(res, method = "BM", stats_config = list(lines = "v"))
+    legend("topleft", legend = "BM-conditional", bty = "n", text.font = 2, cex = 1.1)
+    dev.off()
+    plot(res, method = "BM", stats_config = list(lines = "v"))
+    legend("topleft", legend = "BM-conditional", bty = "n", text.font = 2, cex = 1.1)
+    collector$gusto[[paste0("res",src,dest,"1")]] <- res
+
+    res <- cumulcalibITE(df$Y, df$h, df$t, method = c("BM","BB"))
+    png(paste0(res_path,"gusto_rw_",src,dest,"2.png"), width = 2000, height = 1500, res = 300)
+    plot(res, method = "BM", stats_config = list(lines = "v"))
+    legend("topleft", legend = "BM-marginal", bty = "n", text.font = 2, cex = 1.1)
+    dev.off()
+    plot(res, method = "BM", stats_config = list(lines = "v"))
+    legend("topleft", legend = "BM-marginal", bty = "n", text.font = 2, cex = 1.1)
+    collector$gusto[[paste0("res",src,dest,"2")]] <- res
+  }
+
+saveRDS(collector, paste0(res_path,"collector.RDS"))
+```
+
+
+### Flexible (LOESS-based) calibration plots (experimental)
+
+Conventional counterpart to the cumulative calibration plots. Because the true
+ITE is not observed at the individual level, we estimate it by smoothing the
+outcome against the predicted ITE separately within each treatment arm and
+taking the difference: for a predicted ITE $\delta$, the estimated true ITE is
+$\widehat{E}(Y\mid a=0,\delta) - \widehat{E}(Y\mid a=1,\delta)$ (control risk
+minus treated risk). The dashed line is the identity (perfect moderate
+calibration). Each panel overlays two LOESS bandwidths (span) on the same data to
+show how the analyst's smoothing choice shifts the qualitative read; uncertainty
+bands are omitted for legibility. Uses the models and validation samples created
+in the GUSTO chunk above.
+
+```{r}
+flex_calib <- function(ite_model, val, span = 0.75, trim = 0.02) {
+  tmp <- val; tmp$a <- 0; p0 <- predict(ite_model, newdata = tmp, type = "response")
+  tmp$a <- 1;            p1 <- predict(ite_model, newdata = tmp, type = "response")
+  d <- data.frame(Y = val$Y, h = p0 - p1, a = val$a)
+  lo0 <- loess(Y ~ h, data = d[d$a == 0, ], span = span)   # control arm
+  lo1 <- loess(Y ~ h, data = d[d$a == 1, ], span = span)   # treated arm
+  grid <- seq(quantile(d$h, trim), quantile(d$h, 1 - trim), length.out = 200)
+  f0 <- predict(lo0, data.frame(h = grid), se = TRUE)
+  f1 <- predict(lo1, data.frame(h = grid), se = TRUE)
+  est <- f0$fit - f1$fit                                   # estimated true ITE
+  se  <- sqrt(f0$se.fit^2 + f1$se.fit^2)                   # arms are independent
+  list(grid = grid, est = est, lo = est - 1.96 * se, hi = est + 1.96 * se)
+}
+
+draw_flexcalib_overlay <- function(src, dest, spans = c(2/3, 1),
+                                   cols = c("blue", "red"), ltys = c(1, 1)) {
+  # one panel; layout (mfrow/mar) is set by draw_flexcalib_grid() below
+  fcs <- lapply(spans, function(sp)
+    flex_calib(get(paste0("ite_model", src)), get(paste0("val_data", dest)), span = sp))
+  # Equal aspect (asp = 1) with a common x/y range so the identity line sits at 45
+  # degrees. No uncertainty band is drawn, so the range comes from the predicted
+  # ITEs and the estimated curves at both bandwidths.
+  allx <- unlist(lapply(fcs, `[[`, "grid"))
+  ally <- unlist(lapply(fcs, function(z) z$est[is.finite(z$est)]))
+  lim <- extendrange(c(allx, ally), f = 0.04)
+  plot(NA, asp = 1, xlim = lim, ylim = lim,
+       xlab = "Predicted ITE", ylab = "Estimated true ITE (LOESS)",
+       main = sprintf("%s-dev / %s-val",
+                      ifelse(src == "L", "Large", "Small"),
+                      ifelse(dest == "L", "large", "small")))
+  abline(h = 0, v = 0, col = "grey85")
+  abline(0, 1, col = "grey40", lty = 2)                    # identity = perfect calibration
+  for (i in seq_along(fcs))
+    lines(fcs[[i]]$grid, fcs[[i]]$est, col = cols[i], lty = ltys[i], lwd = 1.8)
+  legend("bottomright", bty = "n", lwd = 1.8, col = cols, lty = ltys,
+         legend = sprintf("span = %.2f", spans))
+}
+
+# Bandwidth sensitivity, all four dev/val combinations in a single 2x2 figure.
+# Each panel overlays two LOESS bandwidths (span = 2/3 and 1) on the same data,
+# without uncertainty bands. The gap between the two curves is the analyst-choice
+# fragility contrasted with the tuning-parameter-free cumulative diagnostic
+# (response to Reviewer 2, R3).
+draw_flexcalib_grid <- function(spans = c(2/3, 1)) {
+  par(mfrow = c(2, 2), mar = c(4, 4, 2.5, 1))
+  for (src in c("L", "S"))
+    for (dest in c("L", "S"))
+      draw_flexcalib_overlay(src, dest, spans = spans)
+}
+
+# Save the single four-panel figure ...
+png(paste0(res_path, "gusto_flexcalib_spans.png"), width = 2200, height = 2000, res = 300)
+draw_flexcalib_grid()
+dev.off()
+# ... and draw again so it also appears inline when knitting
+draw_flexcalib_grid()
+```
+
+
+### Bin-based calibration plots (experimental)
+
+The grouping (quantile-binning) counterpart to the LOESS plots. Observations are
+split into equal-count bins of predicted ITE. Within each bin, the observed ITE is
+estimated as the difference in observed event rates between arms (control minus
+treated), and plotted against the mean predicted ITE in the bin. Each panel
+overlays two bin counts (4 and 5) on the same data to show how the analyst's
+grouping choice shifts the qualitative read -- the binning counterpart of the
+classic Hosmer-Lemeshow "number of groups" arbitrariness. Points are the per-bin
+observed ITEs with 95% confidence-interval whiskers; the dashed coloured lines
+connect the points within each bin count.
+
+```{r}
+bin_calib <- function(ite_model, val, nbins = 10) {
+  tmp <- val; tmp$a <- 0; p0 <- predict(ite_model, newdata = tmp, type = "response")
+  tmp$a <- 1;            p1 <- predict(ite_model, newdata = tmp, type = "response")
+  d <- data.frame(Y = val$Y, h = p0 - p1, a = val$a)
+  br <- quantile(d$h, probs = seq(0, 1, length.out = nbins + 1))
+  d$bin <- cut(d$h, breaks = br, include.lowest = TRUE, labels = FALSE)
+  out <- lapply(sort(unique(d$bin)), function(b) {
+    db <- d[d$bin == b, ]
+    y0 <- db$Y[db$a == 0]; y1 <- db$Y[db$a == 1]
+    m0 <- mean(y0); m1 <- mean(y1)                          # arm event rates in bin
+    data.frame(pred = mean(db$h), obs = m0 - m1,            # observed ITE in bin
+               se = sqrt(m0 * (1 - m0) / length(y0) + m1 * (1 - m1) / length(y1)))
+  })
+  do.call(rbind, out)
+}
+
+draw_bincalib_overlay <- function(src, dest, nbins_set = c(4, 5),
+                                  cols = c("blue", "red"), pchs = c(19, 17)) {
+  par(mar = c(4, 4, 2.5, 1))
+  bcs <- lapply(nbins_set, function(nb)
+    bin_calib(get(paste0("ite_model", src)), get(paste0("val_data", dest)), nb))
+  # Equal aspect with a common 45-degree range from the bin means and observed
+  # ITEs at both bin counts. The CI whiskers still draw but clip in the tails.
+  allx <- unlist(lapply(bcs, `[[`, "pred"))
+  ally <- unlist(lapply(bcs, `[[`, "obs"))
+  lim <- extendrange(c(allx, ally), f = 0.06)
+  plot(NA, asp = 1, xlim = lim, ylim = lim,
+       xlab = "Predicted ITE (bin mean)", ylab = "Observed ITE (bin)",
+       main = sprintf("%s-dev / %s-val",
+                      ifelse(src == "L", "Large", "Small"),
+                      ifelse(dest == "L", "large", "small")))
+  abline(h = 0, v = 0, col = "grey85")
+  abline(0, 1, col = "grey40", lty = 2)                     # identity = perfect calibration
+  for (i in seq_along(bcs)) {
+    lo <- bcs[[i]]$obs - 1.96 * bcs[[i]]$se
+    hi <- bcs[[i]]$obs + 1.96 * bcs[[i]]$se
+    arrows(bcs[[i]]$pred, lo, bcs[[i]]$pred, hi,             # 95% CI whiskers
+           length = 0.02, angle = 90, code = 3, col = cols[i])
+    lines(bcs[[i]]$pred, bcs[[i]]$obs, type = "b",           # dashed connector + points
+          pch = pchs[i], col = cols[i], lwd = 1.6, lty = 2)
+  }
+  legend("bottomright", bty = "n", lwd = 1.6, lty = 2, pch = pchs, col = cols,
+         legend = sprintf("%d bins", nbins_set))
+}
+
+# Bin-count sensitivity on ONE panel: 4 vs 5 quantile bins overlaid on the same
+# data, without confidence intervals. One stand-alone figure per dev/val
+# combination, so each can be copied individually into the response letter
+# (response to Reviewer 2, R3).
+for (src in c("L", "S"))
+  for (dest in c("L", "S")) {
+    fn <- paste0(res_path, "gusto_bincalib_", src, dest, "_bins.png")
+    png(fn, width = 1500, height = 1500, res = 300)
+    draw_bincalib_overlay(src, dest)
+    dev.off()
+    # ... and draw again so each figure also appears inline when knitting
+    draw_bincalib_overlay(src, dest)
+  }
+```
+
